@@ -1,0 +1,235 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+* {
+  -webkit-tap-highlight-color: transparent;
+}
+
+body {
+  @apply bg-[#f8fafc] text-slate-900 antialiased;
+}
+
+#waveform {
+  --waveform-edge-pad: 12px;
+  overflow: visible;
+}
+
+/* Focus rings handled per-element via Tailwind focus-visible:ring-* classes */
+
+.ws-region {
+  border-radius: 12px;
+  overflow: visible;
+}
+
+
+.ws-region[data-overlay='true'] {
+  mix-blend-mode: multiply;
+  pointer-events: none;
+  border: none;
+}
+
+.ws-region-handle {
+  position: relative;
+  top: -3px;
+  width: 12px;
+  height: calc(100% + 6px);
+  background: var(--region-handle-color, rgba(71, 85, 105, 1));
+  border-radius: 0;
+  border: none !important;
+  outline: none !important;
+  pointer-events: auto;
+  top: -3px;
+}
+
+#waveform ::part(region-handle-left),
+#waveform ::part(region-handle-right) {
+  width: 12px;
+  top: -3px;
+  height: calc(100% + 6px);
+  background: var(--region-handle-color, rgba(71, 85, 105, 1));
+  border-radius: 0;
+  border: none !important;
+  outline: none !important;
+  pointer-events: auto;
+}
+
+#waveform ::part(region-handle-left) {
+  margin-left: -12px;
+  border-radius: 6px 0 0 6px;
+}
+
+#waveform ::part(region-handle-right) {
+  margin-right: -12px;
+  border-radius: 0 6px 6px 0;
+}
+
+.ws-region-handle-left {
+  margin-left: -12px;
+  border-radius: 6px 0 0 6px;
+  border-left: 0 !important;
+}
+
+.ws-region-handle-right {
+  margin-right: -12px;
+  border-radius: 0 6px 6px 0;
+  border-right: 0 !important;
+}
+
+.ws-region-handle::after {
+  content: '';
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 4px;
+  height: 4px;
+  transform: translate(-50%, -50%);
+  border-radius: 9999px;
+  background: transparent;
+  box-shadow:
+    0 -5px 0 var(--region-handle-grip, rgba(148, 163, 184, 0.9)),
+    0 5px 0 var(--region-handle-grip, rgba(148, 163, 184, 0.9));
+  pointer-events: none;
+}
+
+#waveform ::part(region-handle-left),
+#waveform ::part(region-handle-right) {
+  background-image:
+    radial-gradient(
+      circle,
+      var(--region-handle-grip, rgba(148, 163, 184, 0.9)) 0 2px,
+      transparent 0px
+    ),
+    radial-gradient(
+      circle,
+      var(--region-handle-grip, rgba(148, 163, 184, 0.9)) 0 2px,
+      transparent 0px
+    );
+  background-repeat: no-repeat;
+  background-size: 4px 4px, 4px 4px;
+  background-position:
+    center calc(50% - 5px),
+    center calc(50% + 5px);
+}
+
+.ws-region [part*='region-content'] {
+  z-index: 10;
+}
+
+#waveform ::part(region-content) {
+  z-index: 10;
+}
+
+#waveform ::part(region) {
+  overflow: visible;
+}
+
+#waveform ::part(scroll) {
+  overflow-x: auto;
+  overflow-y: visible !important;
+  padding-bottom: 0px;
+  padding-left: var(--waveform-edge-pad);
+  padding-right: var(--waveform-edge-pad);
+  scroll-padding-left: var(--waveform-edge-pad);
+  scroll-padding-right: var(--waveform-edge-pad);
+}
+
+#waveform[data-loop-on='true'] ::part(scroll),
+#waveform[data-loop-active='true'] ::part(scroll) {
+  padding-bottom: 21px;
+}
+
+#waveform ::part(wrapper) {
+  overflow: visible;
+  padding-bottom: 0px;
+}
+
+#waveform ::part(regions-container) {
+  overflow: visible;
+}
+
+#waveform ::part(cursor) {
+  width: 2px;
+  background-color: rgba(17, 24, 39, 1);
+  pointer-events: none;
+}
+
+#waveform[data-ready='false'] ::part(cursor) {
+  opacity: 0;
+}
+
+@keyframes seek-toast {
+  0% {
+    opacity: 0;
+    transform: translateY(6px) scale(0.88);
+  }
+  20% {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+  80% {
+    opacity: 1;
+    transform: translateY(-2px) scale(1);
+  }
+  100% {
+    opacity: 0;
+    transform: translateY(-8px) scale(0.92);
+  }
+}
+
+@keyframes seek-toast-in {
+  0% {
+    opacity: 0;
+    transform: translateY(6px) scale(0.88);
+  }
+  100% {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+@keyframes seek-toast-out {
+  0% {
+    opacity: 1;
+    transform: translateY(-2px) scale(1);
+  }
+  100% {
+    opacity: 0;
+    transform: translateY(-8px) scale(0.92);
+  }
+}
+
+.sheet-marker {
+  background: var(--marker-color);
+  border-color: var(--marker-color);
+  color: #ffffff;
+}
+
+.sheet-marker:hover {
+  background: color-mix(in srgb, var(--marker-color) 85%, white);
+  border-color: color-mix(in srgb, var(--marker-color) 85%, white);
+}
+
+[data-dock-shell='true'][data-mode='collapsed'] {
+  position: relative;
+  overflow: visible;
+}
+
+[data-dock-shell='true'][data-mode='collapsed']::before {
+  content: '';
+  position: absolute;
+  inset: -8px;
+  border-radius: 9999px;
+  background: rgba(255, 255, 255, 0.4);
+  backdrop-filter: blur(30px);
+  -webkit-backdrop-filter: blur(30px);
+  mask-image: radial-gradient(ellipse at center, #000 0%, #000 30%, transparent 75%, transparent 100%);
+  -webkit-mask-image: radial-gradient(ellipse at center, #000 0%, #f7f7f7 40%, transparent 75%, transparent 100%);
+  pointer-events: none;
+  z-index: 0;
+}
+
+[data-dock-shell='true'][data-mode='collapsed'] > * {
+  position: relative;
+  z-index: 1;
+}
