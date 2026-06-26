@@ -11,7 +11,11 @@ body {
 }
 
 #waveform {
-  --waveform-edge-pad: 12px;
+  /* No internal scroll padding: WaveSurfer sizes the canvas to the scroll's
+     clientWidth, which includes padding, so any padding here makes the canvas
+     wider than the wrapper and the peaks drift out of sync with the cursor.
+     Edge breathing room for region handles comes from the shell padding. */
+  --waveform-edge-pad: 0px;
   overflow: visible;
 }
 
@@ -24,7 +28,6 @@ body {
 
 
 .ws-region[data-overlay='true'] {
-  mix-blend-mode: multiply;
   pointer-events: none;
   border: none;
 }
@@ -125,7 +128,8 @@ body {
 }
 
 #waveform ::part(scroll) {
-  overflow-x: auto;
+  box-sizing: border-box;
+  overflow-x: visible;
   overflow-y: visible !important;
   padding-bottom: 0px;
   padding-left: var(--waveform-edge-pad);
@@ -232,4 +236,14 @@ body {
 [data-dock-shell='true'][data-mode='collapsed'] > * {
   position: relative;
   z-index: 1;
+}
+
+/* Hide the native scrollbar on the score scroll container — the edge scrubber
+   rail (PDFViewer) replaces it. Scrolling via wheel/touch still works. */
+.no-scrollbar {
+  scrollbar-width: none; /* Firefox */
+  -ms-overflow-style: none; /* old Edge */
+}
+.no-scrollbar::-webkit-scrollbar {
+  display: none; /* WebKit */
 }

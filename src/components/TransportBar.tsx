@@ -6,20 +6,23 @@ import {
   useState,
   forwardRef,
   type PointerEventHandler,
-  type CSSProperties,
   type ReactNode,
   type Ref,
 } from 'react'
 import {
   ArrowDown,
   ArrowUp,
+  AudioLines,
   Headphones,
+  Navigation,
   Pause,
   Play,
+  Repeat,
   RotateCcw,
   RotateCw,
 } from 'lucide-react'
 import { AudioSlider } from './AudioSlider'
+import TrackSelector, { type TrackOption } from './TrackSelector'
 
 const SEEK_SECONDS = 15
 const SEEK_HOLD_DELAY_MS_MOUSE = 260
@@ -48,8 +51,8 @@ const SEEK_HOLD_DELTAS = {
   forward: [5, 10, 30],
 } as const
 const SEEK_TOAST_DURATION_MS = 650
-const TRANSPOSE_MIN = -5
-const TRANSPOSE_MAX = 5
+const TRANSPOSE_MIN = -7
+const TRANSPOSE_MAX = 7
 const TRANSPOSE_GLYPH = '♭♯'
 const SPEED_MIN = 0.5
 const SPEED_MAX = 1.5
@@ -62,6 +65,8 @@ const TRANSPOSE_INTERVALS: Record<number, { quality: 'flat' | 'M' | 'P'; degree:
   3: { quality: 'flat', degree: '3' },
   4: { quality: 'M', degree: '3' },
   5: { quality: 'P', degree: '4' },
+  6: { quality: 'flat', degree: '5' },
+  7: { quality: 'P', degree: '5' },
 }
 const renderTransposeLabel = (semitones: number): ReactNode => {
   if (semitones === 0) {
@@ -81,7 +86,7 @@ const renderTransposeLabel = (semitones: number): ReactNode => {
       )}
       {part.quality === 'flat' ? (
         // Flat at the same baseline and size as the degree — not superscript.
-        <span className="font-normal">♭</span>
+        <span className="font-semibold">♭</span>
       ) : (
         // M / P render at the same size and weight as the degree number.
         <span>{part.quality}</span>
@@ -122,34 +127,23 @@ type TransportBarProps = {
   setBalance: (value: number) => void
   setMono: (value: boolean) => void
   setTranspose: (semitones: number) => void
+  /** Whether repeat is on for the current context (loop if active, else whole song). */
+  repeatActive?: boolean
+  onToggleRepeat?: () => void
+  /** Whether auto-scroll is on for the current context. */
+  autoScrollActive?: boolean
+  /** False when the song has no sync map — the button greys out with a why-tooltip. */
+  autoScrollAvailable?: boolean
+  /** True when a hand-scroll has paused auto-scroll for this listen (tap to resume). */
+  autoScrollSuspended?: boolean
+  onResumeAutoScroll?: () => void
+  onToggleAutoScroll?: () => void
+  /** Track selector (docked at the left of the cluster). Hidden when empty. */
+  tracks?: TrackOption[]
+  activeTrackId?: string
+  onSelectTrack?: (id: string) => void
+  onManageTracks?: () => void
 }
-
-const TransportBarShell = ({
-  mode,
-  children,
-  style,
-}: {
-  mode: TransportBarMode
-  children: ReactNode
-  style?: CSSProperties
-}) => (
-  <div
-    className={`inline-flex items-center justify-center rounded-full motion-reduce:transition-none motion-reduce:transform-none ${
-      mode === 'collapsed'
-        ? 'border border-transparent bg-transparent shadow-none px-0'
-        : 'border border-white/70 bg-white/60 shadow-lg shadow-black/10 backdrop-blur-md dark:border-slate-700/60 dark:bg-slate-900/60 dark:shadow-black/40'
-    } transition-[background-color,border-color,box-shadow,opacity,transform,width] duration-[260ms] ease-in-out ${
-      mode === 'collapsed'
-        ? 'py-2 opacity-100 origin-bottom scale-[0.8] sm:scale-100'
-        : 'py-2 opacity-100'
-    }`}
-    style={style}
-    data-mode={mode}
-    data-dock-shell="true"
-  >
-    {children}
-  </div>
-)
 
 const TransportControls = forwardRef<
   HTMLDivElement,
@@ -205,6 +199,17 @@ export default function TransportBar({
   setBalance,
   setMono,
   setTranspose,
+  repeatActive,
+  onToggleRepeat,
+  autoScrollSuspended,
+  onResumeAutoScroll,
+  autoScrollActive,
+  autoScrollAvailable = true,
+  onToggleAutoScroll,
+  tracks,
+  activeTrackId,
+  onSelectTrack,
+  onManageTracks,
 }: TransportBarProps) {
   const speedButtonRef = useRef<HTMLButtonElement | null>(null)
   const backButtonRef = useRef<HTMLButtonElement | null>(null)
@@ -226,7 +231,6 @@ export default function TransportBar({
   const suppressSeekClickRef = useRef({ back: false, forward: false })
   const backToastTimeoutRef = useRef<number | null>(null)
   const forwardToastTimeoutRef = useRef<number | null>(null)
-  const [shellWidth, setShellWidth] = useState<number | null>(null)
   const [expandedScale, setExpandedScale] = useState(1)
   const [speedMenuOpen, setSpeedMenuOpen] = useState(false)
   const [seekHoldOpen, setSeekHoldOpen] = useState<SeekHoldDirection | null>(null)
@@ -245,6 +249,35 @@ export default function TransportBar({
   const [transposeOpen, setTransposeOpen] = useState(false)
   const transposeButtonRef = useRef<HTMLButtonElement | null>(null)
   const transposePopoverRef = useRef<HTMLDivElement | null>(null)
+  // D3: the combined audio-lines cluster. Opens on click/tap; on desktop (fine
+  // pointer) it also reveals on hover. `audioCluster` is the open-or-hovered union.
+  const [audioOpen, setAudioOpen] = useState(false)
+  const [audioHover, setAudioHover] = useState(false)
+  // D4: brief hint shown when the greyed auto-scroll button is tapped/hovered.
+  const [syncHintOpen, setSyncHintOpen] = useState(false)
+  const syncHintTimerRef = useRef<number | null>(null)
+  const audioClusterRef = useRef<HTMLDivElement | null>(null)
+  const [isFinePointer, setIsFinePointer] = useState(false)
+  useEffect(() => {
+    if (typeof window === 'undefined' || !window.matchMedia) return
+    const mql = window.matchMedia('(pointer: fine)')
+    const apply = () => setIsFinePointer(mql.matches)
+    apply()
+    mql.addEventListener('change', apply)
+    return () => mql.removeEventListener('change', apply)
+  }, [])
+  const audioPanelOpen = audioOpen || (isFinePointer && audioHover)
+  const audioActive = playbackRate !== 1 || transpose !== 0 || Math.abs(balance) > 0.005
+  useEffect(() => {
+    if (!audioOpen) return
+    const handler = (e: MouseEvent) => {
+      if (audioClusterRef.current && !audioClusterRef.current.contains(e.target as Node)) {
+        setAudioOpen(false)
+      }
+    }
+    document.addEventListener('mousedown', handler)
+    return () => document.removeEventListener('mousedown', handler)
+  }, [audioOpen])
 
   const setSeekHoldOpenState = useCallback(
     (next: SeekHoldDirection | null) => {
@@ -609,7 +642,7 @@ export default function TransportBar({
 
 
   const isCollapsed = mode === 'collapsed'
-  const controlsClassName = isCollapsed ? 'gap-4 px-14' : 'gap-3 px-2'
+  const controlsClassName = isCollapsed ? 'gap-4 px-14' : 'gap-1'
   const controlsTransitionClassName =
     'transition-[opacity,transform] duration-200 motion-reduce:transition-none ease-in-out'
   const expandedControlsClassName = `${controlsTransitionClassName} ${
@@ -652,9 +685,9 @@ export default function TransportBar({
     'flex shrink-0 items-center justify-center rounded-full border border-[#4F7F7A]/55 bg-black/5 text-[#0b1220] shadow-sm shadow-black/10 backdrop-blur-sm transition hover:bg-black/10 active:bg-black/15 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#4F7F7A]/40 focus-visible:ring-offset-2 focus-visible:ring-offset-white/80 dark:border-[#4F7F7A]/45 dark:bg-white/10 dark:text-slate-100 dark:shadow-black/30 dark:ring-offset-slate-900/70'
   const toggleActiveClass =
     '!border-[#4F7F7A] !bg-[#4F7F7A]/25 hover:!bg-[#4F7F7A]/30 active:!bg-[#4F7F7A]/35'
-  const iconButtonSize = 'h-10 w-10'
+  const iconButtonSize = 'h-8 w-8'
   const primaryButtonClassName =
-    'flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-[#4F7F7A] text-[#0b1220] shadow-lg shadow-[#4F7F7A]/30 transition hover:scale-[1.02] hover:bg-[#4F7F7A] active:bg-[#4F7F7A] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#4F7F7A]/40 focus-visible:ring-offset-2 focus-visible:ring-offset-white/80 dark:shadow-black/40 dark:ring-offset-slate-900/70'
+    'flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-[#4F7F7A] text-[#0b1220] shadow-lg shadow-[#4F7F7A]/30 transition hover:scale-[1.02] hover:bg-[#4F7F7A] active:bg-[#4F7F7A] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#4F7F7A]/40 focus-visible:ring-offset-2 focus-visible:ring-offset-white/80 dark:shadow-black/40 dark:ring-offset-slate-900/70'
   const seekHoldButtonBase =
     'absolute left-0 top-0 flex h-12 w-12 items-center justify-center rounded-full border border-[#7EA9A3] bg-[#8FB7B2] text-[13px] font-semibold text-[#0b1220] shadow-lg shadow-black/10 backdrop-blur-sm transition-[transform,background-color,border-color,color] duration-[240ms] ease-in-out hover:scale-[1.02] hover:bg-[#4F7F7A] hover:text-white hover:border-[#4F7F7A] active:scale-[0.98] active:bg-[#4F7F7A] active:text-white active:border-[#4F7F7A] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#4F7F7A]/40 focus-visible:ring-offset-2 focus-visible:ring-offset-white/80'
   const seekHoldButtonActive =
@@ -678,13 +711,13 @@ export default function TransportBar({
   }
 
   const renderSeekIcon = (direction: 'back' | 'forward') => (
-    <span className="relative flex h-7 w-7 items-center justify-center">
+    <span className="relative flex h-6 w-6 items-center justify-center">
       {direction === 'back' ? (
-        <RotateCcw size={26} strokeWidth={1.3} />
+        <RotateCcw size={21} strokeWidth={1.4} />
       ) : (
-        <RotateCw size={26} strokeWidth={1.3} />
+        <RotateCw size={21} strokeWidth={1.4} />
       )}
-      <span className="absolute text-[10px] font-semibold leading-none tracking-tight text-current">
+      <span className="absolute text-[9px] font-semibold leading-none tracking-tight text-current">
         {SEEK_SECONDS}
       </span>
     </span>
@@ -756,9 +789,9 @@ export default function TransportBar({
       title={isPlaying ? 'Pause' : 'Play'}
     >
       {isPlaying ? (
-        <Pause size={18} className="text-white" />
+        <Pause size={16} className="text-white" />
       ) : (
-        <Play size={18} className="text-white" />
+        <Play size={16} className="text-white" />
       )}
     </button>
   )
@@ -790,13 +823,154 @@ export default function TransportBar({
   const popoverResetClass =
     'rounded-full bg-slate-100 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-slate-500 transition hover:bg-slate-200 active:bg-slate-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#4F7F7A]/40'
 
-  useEffect(() => {
-    const activeRef = isCollapsed ? collapsedControlsRef : expandedControlsRef
-    const width = measureWidth(activeRef.current)
-    if (width) {
-      setShellWidth(width)
-    }
-  }, [isCollapsed, measureWidth])
+  // D3: Speed/Transpose/Balance combined behind one audio-lines button in the right
+  // zone (opposite Add loop). Desktop reveals on hover; any pointer reveals on tap.
+  // Each control's slider stacks inline; rows stagger in for a neat reveal.
+  const audioRowStyle = (index: number) => ({
+    transition: 'opacity 220ms ease, transform 220ms ease',
+    transitionDelay: audioPanelOpen ? `${60 + index * 55}ms` : '0ms',
+    opacity: audioPanelOpen ? 1 : 0,
+    transform: audioPanelOpen ? 'translateY(0)' : 'translateY(6px)',
+  })
+  const audioControlsCluster = (
+    <div
+      ref={audioClusterRef}
+      className="relative shrink-0"
+      onPointerEnter={(e) => {
+        if (e.pointerType === 'mouse') setAudioHover(true)
+      }}
+      onPointerLeave={(e) => {
+        if (e.pointerType === 'mouse') setAudioHover(false)
+      }}
+    >
+      <div
+        role="group"
+        aria-label="Audio settings"
+        aria-hidden={!audioPanelOpen}
+        className={`absolute bottom-full left-1/2 mb-2 z-[9999] w-64 max-w-[calc(100vw-16px)] -translate-x-1/2 origin-bottom rounded-2xl border border-slate-200 bg-white p-4 shadow-xl transition-[opacity,transform] duration-200 ease-out ${
+          audioPanelOpen
+            ? 'pointer-events-auto opacity-100 translate-y-0 scale-100'
+            : 'pointer-events-none opacity-0 translate-y-2 scale-95'
+        }`}
+      >
+        <div style={audioRowStyle(0)}>
+          <div className="mb-1 flex items-center justify-between">
+            <span className="text-[12px] font-medium text-slate-600">Speed</span>
+            <span className="text-[12px] font-semibold text-slate-800">{formatSpeedLabel(playbackRate)}</span>
+          </div>
+          <AudioSlider
+            value={playbackRate}
+            min={SPEED_MIN}
+            max={SPEED_MAX}
+            step={0.05}
+            center={1}
+            snapThreshold={0.03}
+            onChange={setPlaybackRate}
+            leftLabel={`${SPEED_MIN}`}
+            rightLabel={`${SPEED_MAX}`}
+            ariaLabel="Playback speed"
+            formatValue={formatSpeedLabel}
+            centerSlot={(display) =>
+              Math.abs(display - 1) > 0.001 ? (
+                <button type="button" className={popoverResetClass} onClick={() => setPlaybackRate(1)}>
+                  Reset
+                </button>
+              ) : null
+            }
+          />
+        </div>
+        <div className="my-3 border-t border-slate-100" />
+        <div style={audioRowStyle(1)}>
+          <div className="mb-1 flex items-center justify-between">
+            <span className="text-[12px] font-medium text-slate-600">Transpose</span>
+            <span className="text-[12px] font-semibold text-slate-800">
+              {transpose === 0 ? 'Original' : renderTransposeLabel(transpose)}
+            </span>
+          </div>
+          <AudioSlider
+            value={transpose}
+            min={TRANSPOSE_MIN}
+            max={TRANSPOSE_MAX}
+            step={1}
+            center={0}
+            snapThreshold={0.6}
+            live={false}
+            onChange={setTranspose}
+            leftLabel={renderTransposeLabel(TRANSPOSE_MIN)}
+            rightLabel={renderTransposeLabel(TRANSPOSE_MAX)}
+            ariaLabel="Transpose"
+            centerSlot={(display, dragging) =>
+              dragging ? (
+                <span className="text-[12px] font-semibold leading-none text-slate-700">
+                  {display === 0 ? 'Original' : renderTransposeLabel(display)}
+                </span>
+              ) : display !== 0 ? (
+                <button type="button" className={popoverResetClass} onClick={() => setTranspose(0)}>
+                  Reset
+                </button>
+              ) : null
+            }
+          />
+        </div>
+        <div className="my-3 border-t border-slate-100" />
+        <div style={audioRowStyle(2)}>
+          <div className="mb-1 flex items-center justify-between">
+            <span className="text-[12px] font-medium text-slate-600">Balance</span>
+            {isStereoSource && (
+              <label className="flex items-center gap-1.5 text-[12px] text-slate-600">
+                Mono
+                <button
+                  type="button"
+                  role="switch"
+                  aria-checked={mono}
+                  aria-label="Mono"
+                  onClick={() => setMono(!mono)}
+                  className={`relative inline-flex h-5 w-9 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#4F7F7A]/40 ${
+                    mono ? 'bg-[#4F7F7A]' : 'bg-slate-200'
+                  }`}
+                >
+                  <span
+                    className={`pointer-events-none inline-block h-4 w-4 rounded-full bg-white shadow-sm transition-transform ${
+                      mono ? 'translate-x-4' : 'translate-x-0'
+                    }`}
+                  />
+                </button>
+              </label>
+            )}
+          </div>
+          <AudioSlider
+            value={balance}
+            min={-1}
+            max={1}
+            step={0.01}
+            center={0}
+            snapThreshold={0.05}
+            onChange={setBalance}
+            leftLabel="L"
+            rightLabel="R"
+            ariaLabel="Balance"
+            centerSlot={(display) =>
+              Math.abs(display) > 0.005 ? (
+                <button type="button" className={popoverResetClass} onClick={() => setBalance(0)}>
+                  Reset
+                </button>
+              ) : null
+            }
+          />
+        </div>
+      </div>
+      <button
+        type="button"
+        aria-label="Audio settings"
+        aria-expanded={audioPanelOpen}
+        title="Speed, transpose, balance"
+        onClick={() => setAudioOpen((v) => !v)}
+        className={`${controlButtonBase} ${iconButtonSize} ${audioActive ? toggleActiveClass : ''}`}
+      >
+        <AudioLines size={16} />
+      </button>
+    </div>
+  )
 
   useEffect(() => {
     if (isCollapsed) {
@@ -838,13 +1012,22 @@ export default function TransportBar({
   return (
     <div
       ref={containerRef}
-      className="absolute left-1/2 top-0 flex -translate-x-1/2 -translate-y-[calc(50%+20px)] items-center justify-center"
+      className="flex shrink-0 items-center gap-1.5"
       onPointerEnter={onPointerEnter}
       onPointerLeave={onPointerLeave}
       onPointerDown={onPointerDown}
       onPointerUp={onPointerUp}
       onPointerCancel={onPointerCancel}
     >
+      {tracks && tracks.length > 0 && (
+        <TrackSelector
+          tracks={tracks}
+          activeTrackId={activeTrackId}
+          onSelectTrack={onSelectTrack}
+          onManageTracks={onManageTracks}
+          openDirection="up"
+        />
+      )}
       <div
         className="flex items-center justify-center"
         style={
@@ -853,202 +1036,87 @@ export default function TransportBar({
             : undefined
         }
       >
-        <TransportBarShell
-          mode={mode}
-          style={
-            shellWidth !== null ? { width: `${shellWidth}px` } : undefined
-          }
-        >
           <div className="relative flex items-center justify-center">
             <ExpandedControls
               className={`${controlsClassName} ${expandedControlsClassName}`}
               ref={expandedControlsRef}
             >
+            {onToggleRepeat && (
+              <button
+                type="button"
+                onClick={onToggleRepeat}
+                aria-pressed={repeatActive}
+                title={repeatActive ? 'Repeat on' : 'Repeat off'}
+                aria-label={repeatActive ? 'Repeat on' : 'Repeat off'}
+                className={`${controlButtonBase} ${iconButtonSize} ${
+                  repeatActive ? toggleActiveClass : ''
+                }`}
+              >
+                <Repeat size={15} />
+              </button>
+            )}
             {backButton}
             {playButton}
             {forwardButton}
-            <div className={`flex items-center gap-3 ${expandedExtrasRightClassName}`}>
-            <div className="relative">
-              <button
-                ref={speedButtonRef}
-                className={`${controlButtonBase} ${iconButtonSize} text-xs font-semibold leading-none sm:text-sm ${
-                  playbackRate !== 1 ? toggleActiveClass : ''
-                }`}
-                onClick={() => setSpeedMenuOpen((v) => !v)}
-                type="button"
-                aria-expanded={speedMenuOpen}
-                title="Playback speed"
-              >
-                {speedLabel}
-              </button>
-              {speedMenuOpen && (
-                <div ref={speedPopoverRef} className={popoverPositionClass}>
-                  <AudioSlider
-                    value={playbackRate}
-                    min={SPEED_MIN}
-                    max={SPEED_MAX}
-                    step={0.05}
-                    center={1}
-                    snapThreshold={0.03}
-                    onChange={setPlaybackRate}
-                    leftLabel={`${SPEED_MIN}`}
-                    rightLabel={`${SPEED_MAX}`}
-                    ariaLabel="Playback speed"
-                    formatValue={formatSpeedLabel}
-                    centerSlot={(display) =>
-                      Math.abs(display - 1) > 0.001 ? (
-                        <button
-                          type="button"
-                          className={popoverResetClass}
-                          onClick={() => setPlaybackRate(1)}
-                        >
-                          Reset
-                        </button>
-                      ) : null
+            {onToggleAutoScroll && (
+              <div className="relative">
+                <button
+                  type="button"
+                  aria-label="Auto-scroll"
+                  aria-pressed={autoScrollAvailable ? autoScrollActive && !autoScrollSuspended : undefined}
+                  aria-disabled={!autoScrollAvailable}
+                  title={
+                    !autoScrollAvailable
+                      ? 'Auto-scroll needs a synced score'
+                      : autoScrollSuspended
+                        ? 'Auto-scroll paused — click to resume'
+                        : autoScrollActive
+                          ? 'Auto-scroll on'
+                          : 'Auto-scroll off'
+                  }
+                  onClick={() => {
+                    if (autoScrollSuspended) {
+                      onResumeAutoScroll?.()
+                      return
                     }
-                  />
-                </div>
-              )}
-            </div>
-            <div className="relative">
-              {/* Transpose button — ♭♯ glyph at 0, interval label when shifted */}
-              <button
-                ref={transposeButtonRef}
-                className={`${controlButtonBase} ${iconButtonSize} text-xs font-semibold leading-none sm:text-sm ${
-                  transpose !== 0 ? toggleActiveClass : ''
-                }`}
-                onClick={() => setTransposeOpen((v) => !v)}
-                type="button"
-                aria-expanded={transposeOpen}
-                aria-label="Transpose"
-                title="Transpose (semitones)"
-              >
-                {renderTransposeLabel(transpose)}
-              </button>
-              {transposeOpen && (
-                <div ref={transposePopoverRef} className={popoverPositionClass}>
-                  {/* Commits on release (live={false}) — avoids the worklet
-                      "catch" firing on every intermediate semitone. While
-                      dragging, the center slot previews the interval; on
-                      release it commits to the button and the center shows Reset. */}
-                  <AudioSlider
-                    value={transpose}
-                    min={TRANSPOSE_MIN}
-                    max={TRANSPOSE_MAX}
-                    step={1}
-                    center={0}
-                    snapThreshold={0.6}
-                    live={false}
-                    onChange={setTranspose}
-                    leftLabel={renderTransposeLabel(TRANSPOSE_MIN)}
-                    rightLabel={renderTransposeLabel(TRANSPOSE_MAX)}
-                    ariaLabel="Transpose"
-                    centerSlot={(display, dragging) =>
-                      dragging ? (
-                        <span className="text-[12px] font-semibold leading-none text-slate-700">
-                          {display === 0 ? 'Original' : renderTransposeLabel(display)}
-                        </span>
-                      ) : display !== 0 ? (
-                        <button
-                          type="button"
-                          className={popoverResetClass}
-                          onClick={() => setTranspose(0)}
-                        >
-                          Reset
-                        </button>
-                      ) : null
+                    if (autoScrollAvailable) {
+                      onToggleAutoScroll()
+                      return
                     }
-                  />
-                </div>
-              )}
-            </div>
-            <div className="relative">
-              {/* Headphones button — gradient tints toward the dominant side */}
-              <button
-                ref={headphonesRef}
-                className={`${controlButtonBase} ${iconButtonSize} overflow-hidden`}
-                style={{
-                  // Aggressive overlay: strong accent on the dominant side,
-                  // spilling past center (fade starts ~30% from the quiet edge
-                  // at full pan) for a snappy, obvious tint.
-                  background: (() => {
-                    const m = Math.abs(balance)
-                    if (m < 0.005) return undefined
-                    // Subtle onset (long transparent ramp) that spills to ~80%
-                    // coverage at full pan.
-                    const strong = (0.5 + m * 0.4).toFixed(3)
-                    const fadeStart = (50 - m * 30).toFixed(1)
-                    const dir = balance > 0 ? 'to right' : 'to left'
-                    return `linear-gradient(${dir}, rgba(79,127,122,0) ${fadeStart}%, rgba(79,127,122,${strong}) 100%)`
-                  })(),
-                }}
-                type="button"
-                aria-label="Balance and mono"
-                aria-expanded={balanceOpen}
-                title="Balance L/R"
-                onClick={() => setBalanceOpen((v) => !v)}
-              >
-                <Headphones size={18} />
-              </button>
-
-              {/* Balance popover — mono on top, slider on the bottom (nearest the button) */}
-              {balanceOpen && (
-                <div ref={balancePopoverRef} className={popoverPositionClass}>
-                  {/* Mono toggle — only for stereo sources (a mono track can't
-                      be made stereo, so there's nothing to collapse). */}
-                  {isStereoSource && (
-                    <>
-                      <div className="flex items-center justify-between gap-2">
-                        <span className="text-[13px] text-slate-700">Mono</span>
-                        <button
-                          type="button"
-                          role="switch"
-                          aria-checked={mono}
-                          aria-label="Mono"
-                          onClick={() => setMono(!mono)}
-                          className={`relative inline-flex h-5 w-9 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#4F7F7A]/40 ${
-                            mono ? 'bg-[#4F7F7A]' : 'bg-slate-200'
-                          }`}
-                        >
-                          <span
-                            className={`pointer-events-none inline-block h-4 w-4 rounded-full bg-white shadow-sm transition-transform ${
-                              mono ? 'translate-x-4' : 'translate-x-0'
-                            }`}
-                          />
-                        </button>
-                      </div>
-
-                      <div className="my-3 border-t border-slate-100" />
-                    </>
-                  )}
-
-                  <AudioSlider
-                    value={balance}
-                    min={-1}
-                    max={1}
-                    step={0.01}
-                    center={0}
-                    snapThreshold={0.05}
-                    onChange={setBalance}
-                    leftLabel="L"
-                    rightLabel="R"
-                    ariaLabel="Balance"
-                    centerSlot={(display) =>
-                      Math.abs(display) > 0.005 ? (
-                        <button
-                          type="button"
-                          className={popoverResetClass}
-                          onClick={() => setBalance(0)}
-                        >
-                          Reset
-                        </button>
-                      ) : null
-                    }
-                  />
-                </div>
-              )}
-            </div>
-            </div>
+                    setSyncHintOpen(true)
+                    if (syncHintTimerRef.current) window.clearTimeout(syncHintTimerRef.current)
+                    syncHintTimerRef.current = window.setTimeout(() => setSyncHintOpen(false), 2600)
+                  }}
+                  onPointerEnter={(e) => {
+                    if (!autoScrollAvailable && e.pointerType === 'mouse') setSyncHintOpen(true)
+                  }}
+                  onPointerLeave={(e) => {
+                    if (e.pointerType === 'mouse') setSyncHintOpen(false)
+                  }}
+                  className={`${controlButtonBase} ${iconButtonSize} ${
+                    !autoScrollAvailable
+                      ? 'cursor-help opacity-40'
+                      : autoScrollSuspended
+                        ? 'text-amber-500'
+                        : autoScrollActive
+                          ? toggleActiveClass
+                          : ''
+                  }`}
+                >
+                  <Navigation size={15} />
+                </button>
+                {autoScrollSuspended && autoScrollAvailable && (
+                  <div className="absolute bottom-12 left-1/2 z-[9999] w-44 -translate-x-1/2 rounded-xl border border-amber-200 bg-white px-3 py-2 text-center text-[11px] font-medium leading-snug text-amber-700 shadow-xl">
+                    Click to turn auto-scroll back on
+                  </div>
+                )}
+                {syncHintOpen && !autoScrollAvailable && (
+                  <div className="absolute bottom-12 left-1/2 z-[9999] w-44 -translate-x-1/2 rounded-xl border border-slate-200 bg-white px-3 py-2 text-[11px] font-medium leading-snug text-slate-600 shadow-xl">
+                    Auto-scroll needs a synced score — sync this song first.
+                  </div>
+                )}
+              </div>
+            )}
             </ExpandedControls>
 
             <CollapsedControls
@@ -1060,8 +1128,8 @@ export default function TransportBar({
               {forwardButton}
             </CollapsedControls>
           </div>
-        </TransportBarShell>
       </div>
+      {audioControlsCluster}
     </div>
   )
 }

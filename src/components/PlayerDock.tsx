@@ -8,6 +8,7 @@ import {
   type MutableRefObject,
   type PointerEventHandler,
 } from 'react'
+import { ChevronDown, ChevronUp, Infinity as InfinityIcon, X as XIcon } from 'lucide-react'
 import WaveSurfer from 'wavesurfer.js'
 import RegionsPlugin from 'wavesurfer.js/dist/plugins/regions.esm.js'
 import RecordPlugin from 'wavesurfer.js/dist/plugins/record.esm.js'
@@ -16,10 +17,15 @@ import soundtouchProcessorUrl from '@soundtouchjs/audio-worklet/processor?url'
 import { toast } from 'sonner'
 import { deleteAudioBlob, getAudioBlob, putAudioBlob } from '../lib/audioStore'
 import { useGainEnvelope } from '../lib/useGainEnvelope'
-import { loadJson, saveJson } from '../lib/storage'
+import { localStorageStore, type PracticeStore } from '../lib/storage'
+import { anchorAtTime, type Anchor } from '../lib/syncMap'
+import { buildTimingModel, resolveScrollSegment, type TimingModel } from '../lib/timingModel'
+import type { BeatAnalysis } from '../lib/transcribe'
 import { useTransportVisibility } from '../lib/useTransportVisibility'
 import TransportBar from './TransportBar'
-import type { PDFViewerHandle } from './PDFViewer'
+import LoopLaneStrip from './LoopLaneStrip'
+import type { TrackOption } from './TrackSelector'
+import type { PDFViewerHandle, PlayheadAnchor } from './PDFViewer'
 import type { SavedLoop, SheetPosition } from '../lib/types'
 
 const SAMPLE_URL = '/sample.mp3'
@@ -38,13 +44,22 @@ const LOOP_COLORS = [
 
 const LOOPS_STORAGE_KEY = 'practice:loops'
 const TAKE_STORAGE_KEY = 'practice:take'
-const SHEET_LINK_NUDGE_STORAGE_KEY = 'practice:sheet-link-nudge-dismissed'
 const SCROLL_ON_REPEAT_STORAGE_KEY = 'practice:scroll-on-repeat'
 const BALANCE_STORAGE_KEY = 'practice:balance'
 const MONO_STORAGE_KEY = 'practice:mono'
 const TRANSPOSE_STORAGE_KEY = 'practice:transpose'
-const TRANSPOSE_MIN_SEMITONES = -5
-const TRANSPOSE_MAX_SEMITONES = 5
+const SPEED_STORAGE_KEY = 'practice:speed'
+// C3: two independent GLOBAL repeat values sharing one button — repeat-the-whole-
+// song (when no loop is selected; default off) and repeat-the-loop (when a loop is
+// selected; default on). Not per-loop.
+const REPEAT_SONG_STORAGE_KEY = 'practice:repeat-song'
+const REPEAT_LOOP_STORAGE_KEY = 'practice:repeat-loop'
+// D4: auto-scroll mirrors repeat — two independent global values sharing one button.
+// Default off with no loop, on with a loop selected. Gated on the song being synced.
+const AUTOSCROLL_SONG_STORAGE_KEY = 'practice:autoscroll-song'
+const AUTOSCROLL_LOOP_STORAGE_KEY = 'practice:autoscroll-loop'
+const TRANSPOSE_MIN_SEMITONES = -7
+const TRANSPOSE_MAX_SEMITONES = 7
 const SCROLL_THRESHOLD_PX = 10
 const LOOP_PAD_SECONDS = 0.5
 const LOOP_FADE_SECONDS = 1.0
@@ -60,6 +75,39 @@ const LOOP_COUNTDOWN_SECONDS = 5
 const SCROLL_REPEAT_PROMPT_MS = 3500
 const OVERLAY_ANIMATION_MS = 220
 const clamp = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value))
+
+/**
+ * DEV diagnostic: dump, at a given song time, where the auto-scroll is vs. where the
+ * anchors say the music is. Fired on pause so you can stop ON a word and compare the
+ * word you HEAR to the anchor the engine is following. If the heard word isn't the
+ * ▶-marked (nearest-by-time) anchor, the scroll offset is a Whisper TIMING error in the
+ * anchors — the alignment (word → page/y) is still correct — not a scroll/playback desync.
+ */
+const logScrollProbe = (model: TimingModel, anchors: Anchor[], t: number): void => {
+  if (!anchors.length) return
+  const seg = resolveScrollSegment(model, t)
+  let nearest = anchors[0]
+  for (const a of anchors) if (Math.abs(a.time - t) < Math.abs(nearest.time - t)) nearest = a
+  const norm = (s: string) => s.toLowerCase().replace(/[^a-z]/g, '')
+  const near = anchors
+    .filter((a) => Math.abs(a.time - t) <= 4)
+    .sort((a, b) => a.time - b.time)
+    .map((a) => {
+      const mark = a === nearest ? '▶' : ' '
+      const heard = a.heard && norm(a.heard) !== norm(a.text) ? `  (heard "${a.heard}")` : ''
+      return `   ${mark} ${a.time.toFixed(2).padStart(7)}s  "${a.text}"  p${a.page} y${a.yWithinPageRatio.toFixed(3)}${heard}`
+    })
+  const startPage = model.systems[seg?.startSystem ?? 0]?.page
+  console.warn(
+    `[ScrollProbe] ⏸ audio=${t.toFixed(2)}s | scroll→ ` +
+      (seg ? `system ${seg.startSystem}→${seg.endSystem} (p${startPage}) blend=${seg.blend.toFixed(2)}` : 'idle (manual)') +
+      `\n  nearest anchor by playback time: "${nearest.text}" @${nearest.time.toFixed(2)}s → p${nearest.page} y${nearest.yWithinPageRatio.toFixed(3)}` +
+      `\n  anchors within ±4s (▶ = nearest to where playback actually is):\n` +
+      near.join('\n') +
+      `\n  → The scroll follows these anchor TIMES. If the word you hear right now is NOT the ▶ one,` +
+      `\n    that word's anchor time is off by (now − its time) — the alignment is right, the timestamp is early/late.`
+  )
+}
 
 const enablePitchCorrection = (media: HTMLMediaElement | null) => {
   if (!media) {
@@ -120,7 +168,11 @@ type LoopSheetMarker = {
   name: string
   color: string
   sheetLink: SheetPosition
-  isDraft?: boolean
+  /** Score position of the loop's END, when the timing model can resolve it.
+   * Lets the rail + page-margin bars draw a proportional extent (start→end). */
+  sheetLinkEnd?: SheetPosition
+  /** This loop is the active (selected) one — drives the page-bar selected ring. */
+  active?: boolean
 }
 
 const normalizeSavedLoops = (loops: SavedLoop[]) => {
@@ -223,39 +275,68 @@ type TakeMeta = {
 type PlayerDockProps = {
   scrollContainerRef: MutableRefObject<HTMLDivElement | null>
   pdfViewerRef?: MutableRefObject<PDFViewerHandle | null>
+  /** Audio source for the active track. Defaults to the legacy single-song sample. */
+  audioUrl?: string
+  /** Per-song persistence. Defaults to global localStorage (single-song behavior). */
+  store?: PracticeStore
+  /** This track's lead-in vs song-time: track-time = song-time + leadInOffset. */
+  leadInOffset?: number
+  anchors?: Anchor[]
+  beat?: BeatAnalysis
+  onAnchorsChange?: (anchors: Anchor[]) => void
+  autoScrollEnabled?: boolean
   onLoopMarkersChange?: (markers: LoopSheetMarker[]) => void
   markerActivateRef?: MutableRefObject<((loopId: string) => void) | null>
   onSavedLoopsChange?: (loops: SavedLoop[]) => void
   onActiveLoopIdChange?: (id: string | null) => void
+  onSelectedLoopIdChange?: (id: string | null) => void
   createLoopRef?: MutableRefObject<(() => void) | null>
   deleteLoopRef?: MutableRefObject<((id: string) => void) | null>
-  renameLoopRef?: MutableRefObject<((id: string) => void) | null>
   selectLoopRef?: MutableRefObject<((id: string) => void) | null>
-  confirmDraftRef?: MutableRefObject<((id: string) => void) | null>
-  remarkPositionRef?: MutableRefObject<((id: string) => void) | null>
-  markPositionRef?: MutableRefObject<((id: string) => void) | null>
-  toggleLoopRepeatRef?: MutableRefObject<((id: string) => void) | null>
-  toggleScrollOnRepeatRef?: MutableRefObject<((id: string) => void) | null>
+  exitLoopRef?: MutableRefObject<(() => void) | null>
+  /** Ref to expose a callback that SongView calls when PDF system bands are first ready. */
+  onSystemBandsReadyRef?: MutableRefObject<(() => void) | null>
+  /** Track selector (docked in the transport bar). Hidden when there are none. */
+  tracks?: TrackOption[]
+  activeTrackId?: string
+  onSelectTrack?: (id: string) => void
+  onManageTracks?: () => void
 }
 
 export default function PlayerDock(props: PlayerDockProps) {
   const {
     scrollContainerRef,
     pdfViewerRef,
+    audioUrl = SAMPLE_URL,
+    store = localStorageStore,
+    leadInOffset = 0,
     onLoopMarkersChange,
     markerActivateRef,
     onSavedLoopsChange,
     onActiveLoopIdChange,
+    onSelectedLoopIdChange,
     createLoopRef,
     deleteLoopRef,
-    renameLoopRef,
     selectLoopRef,
-    confirmDraftRef,
-    remarkPositionRef,
-    markPositionRef,
-    toggleLoopRepeatRef,
-    toggleScrollOnRepeatRef,
+    exitLoopRef,
+    onSystemBandsReadyRef,
+    anchors = [],
+    beat,
+    autoScrollEnabled = false,
+    tracks,
+    activeTrackId,
+    onSelectTrack,
+    onManageTracks,
   } = props
+  // Shared loops + sync anchors live in song-time; the audio element plays in
+  // track-time. They differ by this track's lead-in. Convert only at the seams
+  // (region placement, region write-back, anchor resolution); the loop engine
+  // stays entirely in track-time.
+  const offsetRef = useRef(leadInOffset)
+  offsetRef.current = leadInOffset
+  const songToTrackTime = (t: number) => t + offsetRef.current
+  const trackToSongTime = (t: number) => t - offsetRef.current
+
   const containerRef = useRef<HTMLDivElement | null>(null)
   const transportRef = useRef<HTMLDivElement | null>(null)
   const recordContainerRef = useRef<HTMLDivElement | null>(null)
@@ -290,9 +371,15 @@ export default function PlayerDock(props: PlayerDockProps) {
   const regionMapRef = useRef(new Map<string, any>())
   const activeRegionIdRef = useRef<string | null>(null)
   const savedLoopsRef = useRef<SavedLoop[]>([])
-  const pendingRemarkLoopIdRef = useRef<string | null>(null)
   const globalLoopRef = useRef(false)
   const loopRef = useRef(false)
+  // C3 global repeat values (see *_STORAGE_KEY above). `loopOn`/`loopRef` stays the
+  // current-context flag the playback engine reads; these are the remembered toggles.
+  const repeatSongRef = useRef(false)
+  const repeatLoopRef = useRef(true)
+  // D4 global auto-scroll values (see *_STORAGE_KEY above).
+  const autoScrollSongRef = useRef(false)
+  const autoScrollLoopRef = useRef(true)
   const overlayRefs = useRef<{ left: any | null; right: any | null }>({
     left: null,
     right: null,
@@ -311,7 +398,7 @@ export default function PlayerDock(props: PlayerDockProps) {
   const interactionLockRef = useRef(false)
   const isPdfScrollingRef = useRef(false)
   const pdfScrollTimeoutRef = useRef<number | null>(null)
-  const lastSheetNudgeLoopIdRef = useRef<string | null>(null)
+  const timingModelRef = useRef<TimingModel | null>(null)
   const repeatCountdownRef = useRef<number | null>(null)
   const scrollOnRepeatRef = useRef(true)
   const scrollRepeatPromptTimeoutRef = useRef<number | null>(null)
@@ -341,6 +428,31 @@ export default function PlayerDock(props: PlayerDockProps) {
   const [activeRegionId, setActiveRegionId] = useState<string | null>(null)
   const [savedLoops, setSavedLoops] = useState<SavedLoop[]>([])
   const [loopOn, setLoopOn] = useState(false)
+  const [repeatSong, setRepeatSong] = useState(false)
+  const [repeatLoop, setRepeatLoop] = useState(true)
+  const [autoScrollSong, setAutoScrollSong] = useState(false)
+  const [autoScrollLoop, setAutoScrollLoop] = useState(true)
+  // Transient (per-listen, not persisted): a hand-scroll during playback suspends
+  // auto-scroll until the next pause / seek / loop wrap, or a tap on the nav button.
+  const [autoScrollSuspended, setAutoScrollSuspended] = useState(false)
+  // Increments whenever the timing model should be rebuilt: anchors/beat updated, or
+  // the PDF first rendered system bands. loopMarkers depends on this so it recomputes
+  // the moment both anchors AND bands are available, regardless of arrival order.
+  const [timingModelVersion, setTimingModelVersion] = useState(0)
+  // Expose the version-bump callback so SongView can fire it when the PDF bands arrive.
+  useEffect(() => {
+    if (onSystemBandsReadyRef) {
+      onSystemBandsReadyRef.current = () => {
+        // Discard any model built from a partial bands map (e.g. anchors loaded while
+        // only some pages were painted) so it rebuilds from the now-complete document.
+        timingModelRef.current = null
+        setTimingModelVersion(v => v + 1)
+      }
+    }
+    return () => {
+      if (onSystemBandsReadyRef) onSystemBandsReadyRef.current = null
+    }
+  }, [onSystemBandsReadyRef])
   const [playbackRate, setPlaybackRate] = useState(1)
   const [balance, setBalanceState] = useState(0)
   const [mono, setMonoState] = useState(false)
@@ -352,10 +464,10 @@ export default function PlayerDock(props: PlayerDockProps) {
   const [hasHydrated, setHasHydrated] = useState(false)
   const [nameModalOpen, setNameModalOpen] = useState(false)
   const [pendingLoopName, setPendingLoopName] = useState('')
-  const [nameModalMode, setNameModalMode] = useState<'save' | 'rename'>('save')
-  const [pendingRenameId, setPendingRenameId] = useState<string | null>(null)
-  const [pendingSheetLinkId, setPendingSheetLinkId] = useState<string | null>(null)
-  const [sheetLinkNudgeDismissed, setSheetLinkNudgeDismissed] = useState(false)
+  const [selectedLoopId, setSelectedLoopId] = useState<string | null>(null)
+  const [lanesVisible, setLanesVisible] = useState<boolean>(
+    () => store.load<boolean>('practice:lanesVisible') ?? true
+  )
   const [scrollOnRepeat, setScrollOnRepeat] = useState(true)
   const [scrollRepeatPromptVisible, setScrollRepeatPromptVisible] = useState(false)
   const [scrollRepeatOffToastToken, setScrollRepeatOffToastToken] = useState(0)
@@ -465,8 +577,16 @@ export default function PlayerDock(props: PlayerDockProps) {
     if (soundTouchNodeRef.current) {
       return soundTouchNodeRef.current
     }
-    const node = new SoundTouchNode({ context, outputChannelCount: 2 })
+    // Lanczos resampling + full (non-quick) WSOLA seek = higher pitch-shift
+    // quality than the defaults, at a little more CPU. Only ever active while
+    // transposing, so it never touches the default playback path.
+    const node = new SoundTouchNode({ context, outputChannelCount: 2, interpolationStrategy: 'lanczos' })
     node.pitchSemitones.value = transposeRef.current
+    try {
+      node.setStretchParameters({ quickSeek: false })
+    } catch (error) {
+      console.warn('[PlayerDock] SoundTouch quality params unsupported', error)
+    }
     if (masterGainRef.current) {
       node.connect(masterGainRef.current)
     }
@@ -902,7 +1022,9 @@ export default function PlayerDock(props: PlayerDockProps) {
           const activeLoop = savedLoopsRef.current.find((loop) => loop.id === scheduledId)
           const sheetLink = activeLoop?.sheetLink
           const loopScrollOnRepeat = activeLoop?.scrollOnRepeat ?? scrollOnRepeatRef.current
-          if (sheetLink && loopScrollOnRepeat) {
+          // When the continuous auto-scroll is following, it repositions after the
+          // loop seek on its own — don't also fire the per-loop sheet-link jump.
+          if (sheetLink && loopScrollOnRepeat && !autoScrollEnabledRef.current) {
             const viewer = pdfViewerRef?.current ?? null
             if (isPdfScrollingRef.current) {
               logSheetRepeat('skip', { reason: 'scrolling', loopId: scheduledId })
@@ -1188,37 +1310,6 @@ export default function PlayerDock(props: PlayerDockProps) {
   }, [scrollContainerRef])
 
   useEffect(() => {
-    if (!pendingSheetLinkId) {
-      return
-    }
-    const container = scrollContainerRef.current
-    if (!container) {
-      return
-    }
-    const handleClick = (event: MouseEvent) => {
-      const sheetLink = resolveSheetLinkFromClick(event, container)
-      if (!sheetLink) {
-        toast('Click directly on the sheet music page')
-        return
-      }
-      setSavedLoops((loops) =>
-        loops.map((loop) => {
-          if (loop.id !== pendingSheetLinkId) {
-            return loop
-          }
-          return { ...loop, sheetLink }
-        })
-      )
-      setPendingSheetLinkId(null)
-      toast('Linked to sheet music')
-    }
-    container.addEventListener('click', handleClick)
-    return () => {
-      container.removeEventListener('click', handleClick)
-    }
-  }, [pendingSheetLinkId, resolveSheetLinkFromClick, scrollContainerRef])
-
-  useEffect(() => {
     activeRegionIdRef.current = activeRegionId
     if (!activeRegionId) {
       activeBoundsRef.current = null
@@ -1238,6 +1329,124 @@ export default function PlayerDock(props: PlayerDockProps) {
   useEffect(() => {
     savedLoopsRef.current = savedLoops
   }, [savedLoops])
+
+  const anchorsRef = useRef<Anchor[]>(anchors)
+  const beatRef = useRef<BeatAnalysis | undefined>(beat)
+  useEffect(() => {
+    anchorsRef.current = anchors
+    beatRef.current = beat
+    timingModelRef.current = null // rebuild lazily from fresh anchors + bands + beat
+    setTimingModelVersion(v => v + 1)
+  }, [anchors, beat])
+
+  // Resolve a loop's score position using the SAME engine as the live auto-scroll
+  // (resolveScrollSegment), so a loop marker — and clicking it — lands exactly where
+  // playback would put the playhead at that time. Using a different resolver here was
+  // why a clicked loop could jump to a wildly wrong spot that play then corrected.
+  // Before the first anchor the music is on the top system; with no model, the caller
+  // falls back to the current view.
+  const resolveLoopSheetPosition = useCallback(
+    (songTime: number): SheetPosition | null => {
+      const bands = pdfViewerRef?.current?.getSystemBands() ?? {}
+      if (!timingModelRef.current && anchorsRef.current.length && Object.keys(bands).length) {
+        timingModelRef.current = buildTimingModel(anchorsRef.current, bands, beatRef.current)
+      }
+      const model = timingModelRef.current
+      if (!model || !model.systems.length) return null
+      const seg = resolveScrollSegment(model, songTime)
+      if (!seg) {
+        // No segment (before first anchor with unsteady intro).
+        return null
+      }
+      // For times past the last anchor (outro), use the full extent to the final system
+      // so loops visualize their complete span, even with low tempo stability.
+      const lastSample = model.samples[model.samples.length - 1]
+      const sysIndex = songTime > lastSample.time
+        ? model.systems.length - 1 // outro: always extend to final system
+        : Math.round(seg.startSystem + seg.blend * (seg.endSystem - seg.startSystem))
+      const sys = model.systems[Math.min(Math.max(sysIndex, 0), model.systems.length - 1)]
+      return { page: sys.page, yWithinPageRatio: sys.band.topRatio }
+    },
+    [pdfViewerRef]
+  )
+
+  // D4: the live auto-scroll flag is the current-context value (loop if active, else
+  // song). The dev `autoScrollEnabled` prop still force-enables for sync debugging.
+  const autoScrollActive =
+    (activeRegionId ? autoScrollLoop : autoScrollSong) || autoScrollEnabled
+  const autoScrollEnabledRef = useRef(autoScrollActive)
+  useEffect(() => {
+    autoScrollEnabledRef.current = autoScrollActive
+  }, [autoScrollActive])
+
+  // Continuous playback auto-scroll. While playing with auto-scroll on, hand the
+  // PDF viewer a per-frame "where to scroll" closure derived from the timing model:
+  // the playing system's top, ramped (dwell-then-glide) toward the next system's
+  // top, which the viewer pins at an adaptive fraction down the viewport. Parameter-
+  // ized by the measure axis (musical time), not horizontal pixels — see scrollMotion.
+  useEffect(() => {
+    const viewer = pdfViewerRef?.current
+    if (!viewer) return
+    if (!autoScrollActive || !isPlaying || autoScrollSuspended) {
+      viewer.stopPlayheadFollow()
+      return
+    }
+    let debugLastLogTime = -1
+    const getAnchor = (): PlayheadAnchor | null => {
+      const ws = waveSurferRef.current
+      const currentAnchors = anchorsRef.current
+      if (!ws || !currentAnchors.length) return null
+      const bands = viewer.getSystemBands()
+      // Build (and cache) the timing model on first use so systems with no matched
+      // words still scroll on time (the measure axis fills the gaps).
+      if (!timingModelRef.current && Object.keys(bands).length) {
+        timingModelRef.current = buildTimingModel(currentAnchors, bands, beatRef.current)
+        if (import.meta.env.DEV && timingModelRef.current) {
+          const m = timingModelRef.current
+          const last = m.samples[m.samples.length - 1]
+          console.warn(
+            `[SyncModel] built: ${m.samples.length} samples ` +
+            `lastAt=${last?.time.toFixed(2)}s μ=${last?.mu.toFixed(3)} ` +
+            `stability=${m.tempoStability.toFixed(3)} mps=${m.measuresPerSecond.toFixed(4)} ` +
+            `bandPages=${Object.keys(bands).length}`
+          )
+        }
+      }
+      const model = timingModelRef.current
+      if (import.meta.env.DEV) {
+        ;(window as Record<string, unknown>).__syncModel = model
+      }
+      if (!model) return null
+      const time = trackToSongTime(ws.getCurrentTime())
+      // Scroll between sync points at constant PIXEL velocity (see resolveScrollSegment):
+      // glide from one anchor's system to the next's by the time-fraction between them,
+      // so lyric-less stretches and page breaks sweep smoothly instead of pulsing.
+      const seg = resolveScrollSegment(model, time)
+      if (!seg) return null // low-confidence intro → yield to manual scroll
+      const sys = model.systems[seg.startSystem]
+      const next = model.systems[seg.endSystem] ?? sys
+      if (!sys) return null
+      // Dev-only: log scroll state once per second so gaps are diagnosable.
+      if (import.meta.env.DEV && time - debugLastLogTime >= 1) {
+        debugLastLogTime = time
+        console.info(
+          `[SyncScroll] t=${time.toFixed(2)}s sys=${seg.startSystem}(p${sys.page})→${seg.endSystem}(p${next.page}) ` +
+          `blend=${seg.blend.toFixed(3)} mps=${model.measuresPerSecond.toFixed(4)} stab=${model.tempoStability.toFixed(2)}`
+        )
+      }
+      return {
+        current: { page: sys.page, yWithinPageRatio: sys.band.topRatio },
+        next: { page: next.page, yWithinPageRatio: next.band.topRatio },
+        blend: seg.blend,
+        // Piece-level steadiness for the vertical anchor — stable, so it won't jitter.
+        stability: model.tempoStability,
+        systemHeightRatio: Math.max(0, sys.band.bottomRatio - sys.band.topRatio),
+        time,
+      }
+    }
+    viewer.startPlayheadFollow(getAnchor, () => setAutoScrollSuspended(true))
+    return () => viewer.stopPlayheadFollow()
+  }, [autoScrollActive, isPlaying, autoScrollSuspended, pdfViewerRef])
 
   useEffect(() => {
     scrollOnRepeatRef.current = scrollOnRepeat
@@ -1303,32 +1512,29 @@ export default function PlayerDock(props: PlayerDockProps) {
   }, [takeMeta])
 
   useEffect(() => {
-    const storedLoops = loadJson<SavedLoop[]>(LOOPS_STORAGE_KEY)
+    const storedLoops = store.load<SavedLoop[]>(LOOPS_STORAGE_KEY)
     if (storedLoops && Array.isArray(storedLoops)) {
       setSavedLoops(normalizeSavedLoops(storedLoops))
     }
-    const storedNudgeDismissed = loadJson<boolean>(SHEET_LINK_NUDGE_STORAGE_KEY)
-    if (storedNudgeDismissed) {
-      setSheetLinkNudgeDismissed(true)
-    }
-    const storedScrollOnRepeat = loadJson<boolean>(SCROLL_ON_REPEAT_STORAGE_KEY)
+
+    const storedScrollOnRepeat = store.load<boolean>(SCROLL_ON_REPEAT_STORAGE_KEY)
     if (typeof storedScrollOnRepeat === 'boolean') {
       setScrollOnRepeat(storedScrollOnRepeat)
       scrollOnRepeatRef.current = storedScrollOnRepeat
     }
     // Restore into refs synchronously so ensureBalanceChain picks them up when
     // the audio graph is first built (this effect runs before WaveSurfer setup).
-    const storedBalance = loadJson<number>(BALANCE_STORAGE_KEY)
+    const storedBalance = store.load<number>(BALANCE_STORAGE_KEY)
     if (typeof storedBalance === 'number') {
       balanceRef.current = storedBalance
       setBalanceState(storedBalance)
     }
-    const storedMono = loadJson<boolean>(MONO_STORAGE_KEY)
+    const storedMono = store.load<boolean>(MONO_STORAGE_KEY)
     if (typeof storedMono === 'boolean') {
       monoRef.current = storedMono
       setMonoState(storedMono)
     }
-    const storedTranspose = loadJson<number>(TRANSPOSE_STORAGE_KEY)
+    const storedTranspose = store.load<number>(TRANSPOSE_STORAGE_KEY)
     if (typeof storedTranspose === 'number') {
       const clampedTranspose = clamp(
         Math.round(storedTranspose),
@@ -1338,11 +1544,38 @@ export default function PlayerDock(props: PlayerDockProps) {
       transposeRef.current = clampedTranspose
       setTransposeState(clampedTranspose)
     }
-    const storedTake = loadJson<TakeMeta>(TAKE_STORAGE_KEY)
+    const storedSpeed = store.load<number>(SPEED_STORAGE_KEY)
+    if (typeof storedSpeed === 'number' && storedSpeed > 0) {
+      playbackRateRef.current = storedSpeed
+      setPlaybackRate(storedSpeed)
+    }
+    const storedTake = store.load<TakeMeta>(TAKE_STORAGE_KEY)
     if (storedTake?.id) {
       setTakeMeta(storedTake)
       setTakeVolume(storedTake.volume ?? 0.9)
     }
+    const storedRepeatSong = store.load<boolean>(REPEAT_SONG_STORAGE_KEY)
+    if (typeof storedRepeatSong === 'boolean') {
+      repeatSongRef.current = storedRepeatSong
+      setRepeatSong(storedRepeatSong)
+    }
+    const storedRepeatLoop = store.load<boolean>(REPEAT_LOOP_STORAGE_KEY)
+    if (typeof storedRepeatLoop === 'boolean') {
+      repeatLoopRef.current = storedRepeatLoop
+      setRepeatLoop(storedRepeatLoop)
+    }
+    const storedAutoScrollSong = store.load<boolean>(AUTOSCROLL_SONG_STORAGE_KEY)
+    if (typeof storedAutoScrollSong === 'boolean') {
+      autoScrollSongRef.current = storedAutoScrollSong
+      setAutoScrollSong(storedAutoScrollSong)
+    }
+    const storedAutoScrollLoop = store.load<boolean>(AUTOSCROLL_LOOP_STORAGE_KEY)
+    if (typeof storedAutoScrollLoop === 'boolean') {
+      autoScrollLoopRef.current = storedAutoScrollLoop
+      setAutoScrollLoop(storedAutoScrollLoop)
+    }
+    // No loop is active at hydration, so the live flag reflects the song value.
+    setLoopOn(repeatSongRef.current)
     setHasHydrated(true)
   }, [])
 
@@ -1355,7 +1588,7 @@ export default function PlayerDock(props: PlayerDockProps) {
       setSavedLoops(normalized)
       return
     }
-    saveJson(LOOPS_STORAGE_KEY, normalized)
+    store.save(LOOPS_STORAGE_KEY, normalized)
   }, [savedLoops, hasHydrated])
 
   useEffect(() => {
@@ -1368,24 +1601,35 @@ export default function PlayerDock(props: PlayerDockProps) {
     if (!hasHydrated) {
       return
     }
-    saveJson(TAKE_STORAGE_KEY, takeMeta ? { ...takeMeta, volume: takeVolume } : null)
+    store.save(TAKE_STORAGE_KEY, takeMeta ? { ...takeMeta, volume: takeVolume } : null)
   }, [takeMeta, takeVolume, hasHydrated])
 
   useEffect(() => {
     if (!hasHydrated) {
       return
     }
-    saveJson(SCROLL_ON_REPEAT_STORAGE_KEY, scrollOnRepeat)
+    store.save(SCROLL_ON_REPEAT_STORAGE_KEY, scrollOnRepeat)
   }, [hasHydrated, scrollOnRepeat])
 
   useEffect(() => {
     if (!hasHydrated) {
       return
     }
-    saveJson(BALANCE_STORAGE_KEY, balance)
-    saveJson(MONO_STORAGE_KEY, mono)
-    saveJson(TRANSPOSE_STORAGE_KEY, transpose)
-  }, [hasHydrated, balance, mono, transpose])
+    store.save(BALANCE_STORAGE_KEY, balance)
+    store.save(MONO_STORAGE_KEY, mono)
+    store.save(TRANSPOSE_STORAGE_KEY, transpose)
+    store.save(REPEAT_SONG_STORAGE_KEY, repeatSong)
+    store.save(REPEAT_LOOP_STORAGE_KEY, repeatLoop)
+    store.save(AUTOSCROLL_SONG_STORAGE_KEY, autoScrollSong)
+    store.save(AUTOSCROLL_LOOP_STORAGE_KEY, autoScrollLoop)
+  }, [hasHydrated, balance, mono, transpose, repeatSong, repeatLoop, autoScrollSong, autoScrollLoop])
+
+  useEffect(() => {
+    if (!hasHydrated) {
+      return
+    }
+    store.save(SPEED_STORAGE_KEY, playbackRate)
+  }, [hasHydrated, playbackRate])
 
   // Once the audio graph exists, lazily build the SoundTouch node and reroute if
   // a non-zero transpose was restored from a previous session.
@@ -1432,7 +1676,7 @@ export default function PlayerDock(props: PlayerDockProps) {
     if (!OfflineCtor) return
     ;(async () => {
       try {
-        const response = await fetch(SAMPLE_URL)
+        const response = await fetch(audioUrl)
         const arrayBuffer = await response.arrayBuffer()
         const offline = new OfflineCtor(2, 1, 8000)
         const decoded = await offline.decodeAudioData(arrayBuffer)
@@ -1503,10 +1747,14 @@ export default function PlayerDock(props: PlayerDockProps) {
     const regions = waveSurfer.registerPlugin(RegionsPlugin.create())
     waveSurferRef.current = waveSurfer
     regionsRef.current = regions
+    if (import.meta.env.DEV && typeof window !== 'undefined') {
+      ;(window as Record<string, unknown>).__ws = waveSurfer
+      ;(window as Record<string, unknown>).__regions = regions
+    }
     if (DEBUG_LOOP_BG) {
       logLoopBg('wsCreated', { hasContainer: Boolean(containerRef.current) })
     }
-    const loadResult = waveSurfer.load(SAMPLE_URL)
+    const loadResult = waveSurfer.load(audioUrl)
     if (loadResult && typeof (loadResult as Promise<void>).catch === 'function') {
       ;(loadResult as Promise<void>).catch((error) => {
         const err = error as { name?: string; message?: string }
@@ -1543,6 +1791,7 @@ export default function PlayerDock(props: PlayerDockProps) {
         logLoopBg('wsPlay', { currentTime: waveSurfer.getCurrentTime() })
       }
       setIsPlaying(true)
+      setAutoScrollSuspended(false) // a fresh listen starts with auto-scroll live
       syncTakePlayback(waveSurfer.getCurrentTime(), true)
       const pendingFade = pendingFadeInRef.current
       if (pendingFade) {
@@ -1566,9 +1815,17 @@ export default function PlayerDock(props: PlayerDockProps) {
         logLoopBg('wsPause', { currentTime: waveSurfer.getCurrentTime() })
       }
       setIsPlaying(false)
+      setAutoScrollSuspended(false) // pausing re-arms auto-scroll for the next listen
       cancelLoopFades()
       clearLoopTimers()
       stopTakePlayback()
+      if (import.meta.env.DEV) {
+        pdfViewerRef?.current?.setSyncHighlight(null)
+        // Pause ON a sung word to compare what you HEAR with what the scroll is following.
+        if (timingModelRef.current) {
+          logScrollProbe(timingModelRef.current, anchorsRef.current, trackToSongTime(waveSurfer.getCurrentTime()))
+        }
+      }
     })
 
     waveSurfer.on('finish', () => {
@@ -1589,14 +1846,22 @@ export default function PlayerDock(props: PlayerDockProps) {
         return
       }
       setIsPlaying(false)
+      setAutoScrollSuspended(false)
       cancelLoopFades()
       stopTakePlayback()
+    })
+
+    // Any seek — loop wrap, skip, scrub — starts a new pass, so re-arm auto-scroll.
+    waveSurfer.on('seeking', () => {
+      if (destroyed || waveSurferRef.current !== waveSurfer) return
+      setAutoScrollSuspended(false)
     })
 
     waveSurfer.on('interaction', (time: number) => {
       if (destroyed || waveSurferRef.current !== waveSurfer) {
         return
       }
+      setAutoScrollSuspended(false)
       cancelLoopFades()
       if (dragSeekRef.current) {
         skipFadeUntilTimeRef.current = time
@@ -1638,6 +1903,21 @@ export default function PlayerDock(props: PlayerDockProps) {
       }
       if (waveSurfer.isPlaying()) {
         syncTakePlayback(time, false)
+        const currentAnchors = anchorsRef.current
+        if (currentAnchors.length) {
+          const anchor = anchorAtTime(currentAnchors, time)
+          if (import.meta.env.DEV && anchor) {
+            pdfViewerRef?.current?.setSyncHighlight({
+              page: anchor.page,
+              yWithinPageRatio: anchor.yWithinPageRatio,
+              text: anchor.text,
+              confidence: anchor.confidence,
+              time: anchor.time,
+            })
+          }
+          // Auto-scroll is driven continuously by the playhead-follow effect below
+          // (PDFViewer.startPlayheadFollow), not per timeupdate tick.
+        }
       }
       runDriftGuard(time, 'timeupdate')
     })
@@ -1856,19 +2136,31 @@ export default function PlayerDock(props: PlayerDockProps) {
   )
   const activeSavedLoopId = activeSavedLoop?.id ?? null
   const activeSavedLoopHasSheetLink = Boolean(activeSavedLoop?.sheetLink)
-  const loopMarkers = useMemo(
-    () =>
-      savedLoops
-        .filter((loop) => loop.sheetLink || loop.sheetLinkDraft)
-        .map((loop) => ({
-          id: loop.id,
-          name: loop.name,
-          color: loop.color ?? '#94a3b8',
-          sheetLink: (loop.sheetLink ?? loop.sheetLinkDraft) as SheetPosition,
-          isDraft: !loop.sheetLink && Boolean(loop.sheetLinkDraft),
-        })),
-    [savedLoops]
-  )
+  const loopMarkers = useMemo<LoopSheetMarker[]>(() => {
+    const out: LoopSheetMarker[] = []
+    for (const loop of savedLoops) {
+      // Prefer the timing model (same measure axis as auto-scroll) so both the
+      // start and end positions track live as the loop is dragged; fall back to
+      // the stored start link when the song isn't synced yet (end then unset →
+      // the rail/page bars draw a min-height marker).
+      const start =
+        resolveLoopSheetPosition(loop.start) ?? loop.sheetLink ?? loop.sheetLinkDraft
+      if (!start) continue
+      out.push({
+        id: loop.id,
+        name: loop.name,
+        color: loop.color ?? '#94a3b8',
+        sheetLink: start,
+        sheetLinkEnd: resolveLoopSheetPosition(loop.end) ?? undefined,
+        active: loop.id === activeRegionId,
+      })
+    }
+    return out
+    // `timingModelVersion` increments when anchors/beat change OR when the PDF first
+    // renders system bands — whichever arrives last. That's exactly when the timing model
+    // can be successfully built, so the memo recomputes at the right moment regardless of
+    // arrival order. `savedLoops` tracks live drags; `activeRegionId` updates active state.
+  }, [savedLoops, timingModelVersion, resolveLoopSheetPosition, activeRegionId])
   const countdownRemaining = repeatCountdown !== null ? Math.max(0, repeatCountdown) : null
   const showCountdown = countdownRemaining !== null
   const countdownProgress = showCountdown
@@ -1892,13 +2184,6 @@ export default function PlayerDock(props: PlayerDockProps) {
       : 'right-4 top-0 -translate-y-[calc(100%+60px)] sm:-translate-y-[calc(100%+20px)]'
   const overlayActionButtonClassName =
     'pointer-events-auto whitespace-nowrap rounded-full border border-[#4F7F7A]/55 bg-[#f1f1f1] px-3 py-1 text-xs font-semibold text-[#0b1220] shadow-sm shadow-black/10 backdrop-blur-sm transition hover:bg-[#e7e7e7] active:bg-[#dedede] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#4F7F7A]/40 focus-visible:ring-offset-2 focus-visible:ring-offset-white/80'
-  const nameModalTitle = nameModalMode === 'rename' ? 'Rename loop' : 'Name this loop'
-  const nameModalDescription =
-    nameModalMode === 'rename'
-      ? 'Update the label for this loop.'
-      : 'Give this region a memorable name.'
-  const nameModalActionLabel = nameModalMode === 'rename' ? 'Save name' : 'Save loop'
-
   const ensureAudioContext = () => {
     if (!audioContextRef.current) {
       const context = new AudioContext()
@@ -2015,32 +2300,7 @@ export default function PlayerDock(props: PlayerDockProps) {
   }
 
   const setRegionLabel = (region: any, name: string) => {
-    if (!region?.element || !name) {
-      return
-    }
-    region.loopName = name
-    region.element.style.overflow = 'visible'
-    const label = document.createElement('div')
-    label.textContent = name
-    const baseColor = region.loopColor ?? region.color ?? '#64748b'
-    const labelColor = getHandleColor(baseColor)
-    Object.assign(label.style, {
-      position: 'absolute',
-      top: 'calc(100% + 6px)',
-      left: '50%',
-      transform: 'translateX(-50%)',
-      zIndex: '4',
-      fontSize: '12px',
-      lineHeight: '1',
-      color: '#ffffff',
-      background: labelColor,
-      border: `1px solid ${labelColor}`,
-      borderRadius: '9999px',
-      padding: '2px 6px',
-      whiteSpace: 'nowrap',
-      pointerEvents: 'none',
-    })
-    region.setContent(label)
+    if (region) region.loopName = name
   }
 
   const setRegionHandleAccessibility = (region: any) => {
@@ -2442,14 +2702,18 @@ export default function PlayerDock(props: PlayerDockProps) {
     const leftEnd = Math.max(0, region.start)
     const rightStart = Math.min(dur, region.end)
 
-    const GREY = 'rgba(255, 255, 255, 0.76)'
+    // A translucent white veil over the out-of-loop area: light enough to stay
+    // see-through (matching the waveform's other states — the A3 complaint was the
+    // old 0.76 reading as a solid block) yet still lightens the bars beneath, so
+    // the already-played portion to the left of the loop keeps its faded look.
+    const OVERLAY_COLOR = 'rgba(255, 255, 255, 0.45)'
 
     if (leftEnd - 0 > 0.01) {
       if (!overlays.left) {
         overlays.left = regionsPlugin.addRegion({
           start: 0,
           end: leftEnd,
-          color: GREY,
+          color: OVERLAY_COLOR,
           drag: false,
           resize: false,
         })
@@ -2458,7 +2722,7 @@ export default function PlayerDock(props: PlayerDockProps) {
           overlays.left.element.style.zIndex = '1'
         }
       } else {
-        overlays.left.setOptions({ start: 0, end: leftEnd, color: GREY })
+        overlays.left.setOptions({ start: 0, end: leftEnd, color: OVERLAY_COLOR })
       }
     } else if (overlays.left) {
       try {
@@ -2472,7 +2736,7 @@ export default function PlayerDock(props: PlayerDockProps) {
         overlays.right = regionsPlugin.addRegion({
           start: rightStart,
           end: dur,
-          color: GREY,
+          color: OVERLAY_COLOR,
           drag: false,
           resize: false,
         })
@@ -2481,7 +2745,7 @@ export default function PlayerDock(props: PlayerDockProps) {
           overlays.right.element.style.zIndex = '1'
         }
       } else {
-        overlays.right.setOptions({ start: rightStart, end: dur, color: GREY })
+        overlays.right.setOptions({ start: rightStart, end: dur, color: OVERLAY_COLOR })
       }
     } else if (overlays.right) {
       try {
@@ -2534,7 +2798,7 @@ export default function PlayerDock(props: PlayerDockProps) {
     setSavedLoops((loops) =>
       loops.map((loop) =>
         loop.id === region.id
-          ? { ...loop, start: region.start, end: region.end }
+          ? { ...loop, start: trackToSongTime(region.start), end: trackToSongTime(region.end) }
           : loop
       )
     )
@@ -2566,8 +2830,8 @@ export default function PlayerDock(props: PlayerDockProps) {
     const existing = regionMapRef.current.get(loop.id)
     if (existing) {
       existing.setOptions({
-        start: loop.start,
-        end: loop.end,
+        start: songToTrackTime(loop.start),
+        end: songToTrackTime(loop.end),
         color: REGION_TRANSPARENT_COLOR,
         drag: false,
       })
@@ -2577,8 +2841,8 @@ export default function PlayerDock(props: PlayerDockProps) {
     }
     const region = regionsRef.current.addRegion({
       id: loop.id,
-      start: loop.start,
-      end: loop.end,
+      start: songToTrackTime(loop.start),
+      end: songToTrackTime(loop.end),
       color: REGION_TRANSPARENT_COLOR,
       drag: false,
       resize: true,
@@ -2591,8 +2855,6 @@ export default function PlayerDock(props: PlayerDockProps) {
 
   const closeNameModal = () => {
     setNameModalOpen(false)
-    setPendingRenameId(null)
-    setNameModalMode('save')
   }
 
   const beginSaveRegion = () => {
@@ -2600,35 +2862,10 @@ export default function PlayerDock(props: PlayerDockProps) {
       return
     }
     setPendingLoopName(`Loop ${savedLoops.length + 1}`)
-    setNameModalMode('save')
-    setPendingRenameId(null)
     setNameModalOpen(true)
   }
 
   const confirmSaveRegion = () => {
-    if (nameModalMode === 'rename') {
-      const regionId = pendingRenameId
-      const trimmed = pendingLoopName.trim()
-      if (!regionId) {
-        closeNameModal()
-        return
-      }
-      const existing = savedLoopsRef.current.find((loop) => loop.id === regionId)
-      if (!existing) {
-        closeNameModal()
-        return
-      }
-      const nextName = trimmed || existing.name
-      setSavedLoops((loops) =>
-        loops.map((loop) => (loop.id === regionId ? { ...loop, name: nextName } : loop))
-      )
-      const region = regionMapRef.current.get(regionId)
-      if (region) {
-        setRegionLabel(region, nextName)
-      }
-      closeNameModal()
-      return
-    }
     if (!activeRegion || !activeRegionId || activeSavedLoop) {
       closeNameModal()
       return
@@ -2637,12 +2874,14 @@ export default function PlayerDock(props: PlayerDockProps) {
     const color = activeRegion.loopColor ?? getNextLoopColor()
     setRegionVisuals(activeRegion, color)
     setRegionLabel(activeRegion, name)
-    const draftPos = pdfViewerRef?.current?.getSheetPosition()
+    setAutoScrollSuspended(false) // creating a loop is a fresh action → re-arm auto-scroll
+    const autoPos = resolveLoopSheetPosition(trackToSongTime(activeRegion.start))
+    const draftPos = autoPos ?? pdfViewerRef?.current?.getSheetPosition()
     const nextLoop: SavedLoop = {
       id: activeRegionId,
       name,
-      start: activeRegion.start,
-      end: activeRegion.end,
+      start: trackToSongTime(activeRegion.start),
+      end: trackToSongTime(activeRegion.end),
       color,
       loopOn: loopRef.current,
       sheetLinkDraft: draftPos ?? undefined,
@@ -2650,23 +2889,6 @@ export default function PlayerDock(props: PlayerDockProps) {
     setSavedLoops((loops) => [...loops, nextLoop])
     closeNameModal()
   }
-
-  const linkLoopToSheet = useCallback(
-    (regionId: string) => {
-      const container = scrollContainerRef.current
-      if (!container) {
-        toast('Sheet music not ready')
-        return
-      }
-      const existing = savedLoopsRef.current.find((loop) => loop.id === regionId)
-      if (!existing) {
-        return
-      }
-      setPendingSheetLinkId(regionId)
-      toast('Click on the sheet music where the loop starts')
-    },
-    [scrollContainerRef]
-  )
 
   const setScrollOnRepeatEnabled = useCallback(
     (nextValue: boolean, options?: { notifyOff?: boolean }) => {
@@ -2710,62 +2932,47 @@ export default function PlayerDock(props: PlayerDockProps) {
   }, [])
 
   useEffect(() => {
-    if (!activeSavedLoopId) {
-      lastSheetNudgeLoopIdRef.current = null
-      return
-    }
-    if (activeSavedLoopId === lastSheetNudgeLoopIdRef.current) {
-      return
-    }
-    lastSheetNudgeLoopIdRef.current = activeSavedLoopId
-    if (sheetLinkNudgeDismissed || activeSavedLoopHasSheetLink) {
-      return
-    }
-    toast('Link this loop to the sheet music to return on repeat.', {
-      action: {
-        label: 'Link now',
-        onClick: () => linkLoopToSheet(activeSavedLoopId),
-      },
-      cancel: {
-        label: "Don't remind",
-        onClick: () => {
-          setSheetLinkNudgeDismissed(true)
-          saveJson(SHEET_LINK_NUDGE_STORAGE_KEY, true)
-        },
-      },
-    })
-  }, [
-    activeSavedLoopHasSheetLink,
-    activeSavedLoopId,
-    linkLoopToSheet,
-    sheetLinkNudgeDismissed,
-  ])
-
-  useEffect(() => {
     if (!onLoopMarkersChange) {
       return
     }
     onLoopMarkersChange(loopMarkers)
   }, [loopMarkers, onLoopMarkersChange])
 
-  const beginRenameLoop = (regionId: string) => {
-    const existing = savedLoopsRef.current.find((loop) => loop.id === regionId)
-    if (!existing) {
-      return
-    }
-    setPendingLoopName(existing.name)
-    setNameModalMode('rename')
-    setPendingRenameId(regionId)
-    setNameModalOpen(true)
+  const saveLoopName = (id: string, name: string) => {
+    const trimmed = name.trim()
+    if (!trimmed) return
+    setSavedLoops((prev) => prev.map((l) => (l.id === id ? { ...l, name: trimmed } : l)))
+    const region = regionMapRef.current.get(id)
+    if (region) setRegionLabel(region, trimmed)
   }
 
   const deleteSavedLoop = (regionId: string) => {
+    const snapshot = savedLoopsRef.current.find((l) => l.id === regionId)
+    const wasActive = activeRegionIdRef.current === regionId
     setSavedLoops((loops) => loops.filter((loop) => loop.id !== regionId))
-    if (activeRegionIdRef.current === regionId) {
+    if (wasActive) {
       exitLoop()
-      return
+    } else {
+      removeRegionById(regionId)
     }
-    removeRegionById(regionId)
+    if (!snapshot) return
+    const loopSnapshot = { ...snapshot }
+    toast('Loop deleted', {
+      duration: 5000,
+      action: {
+        label: 'Undo',
+        onClick: () => {
+          setSavedLoops((loops) => {
+            const idx = loops.findIndex((l) => l.start > loopSnapshot.start)
+            const copy = [...loops]
+            if (idx === -1) copy.push(loopSnapshot)
+            else copy.splice(idx, 0, loopSnapshot)
+            return copy
+          })
+          ensureRegionForSavedLoop(loopSnapshot)
+        },
+      },
+    })
   }
 
   const removeRegionById = (regionId: string | null) => {
@@ -2807,7 +3014,8 @@ export default function PlayerDock(props: PlayerDockProps) {
     if (savedLoop) {
       setRegionLabel(region, savedLoop.name)
     }
-    const nextLoopState = savedLoop ? savedLoop.loopOn : true
+    // C3: repeat-loop is a single global value, not per-loop.
+    const nextLoopState = repeatLoopRef.current
     setLoopOn(nextLoopState)
     const bounds = setActiveBounds(
       { start: region.start, end: region.end },
@@ -2819,15 +3027,18 @@ export default function PlayerDock(props: PlayerDockProps) {
       const startTime = nextLoopState ? bounds.extendedStart : region.start
       ws.setTime(startTime)
       if (wasPlaying) {
+        // Already playing: keep playing the newly-selected loop.
         startFadeIn(bounds, startTime)
+        ensureAudioContext()
+        ws.play()
+        scheduleLoopTimers({ skipFadeIn: true })
       } else {
+        // C1: paused + loop selected → don't start playback. Position the cursor at
+        // the loop start, prime the fade-in for the next play, and scroll the PDF to
+        // the loop's start so the user sees where the loop begins.
         pendingFadeInRef.current = bounds
         setGainImmediate(LOOP_MIN_VOLUME)
-      }
-      ensureAudioContext()
-      ws.play()
-      if (wasPlaying) {
-        scheduleLoopTimers({ skipFadeIn: true })
+        scrollToLoopMarker(regionId)
       }
     }
     updateGreyOverlays(region)
@@ -2840,7 +3051,8 @@ export default function PlayerDock(props: PlayerDockProps) {
     }
     activeRegionIdRef.current = null
     setActiveRegionId(null)
-    setLoopOn(globalLoopRef.current)
+    // C3: back to no-loop context → the live flag reflects the song-repeat value.
+    setLoopOn(repeatSongRef.current)
     cancelLoopFades()
     clearLoopTimers()
     pendingFadeInRef.current = null
@@ -2874,12 +3086,14 @@ export default function PlayerDock(props: PlayerDockProps) {
     // The user can rename inline in the sidebar chip.
     const name = `Loop ${savedLoopsRef.current.length + 1}`
     setRegionLabel(region, name)
-    const draftPos = pdfViewerRef?.current?.getSheetPosition()
+    setAutoScrollSuspended(false) // creating a loop is a fresh action → re-arm auto-scroll
+    const autoPos = resolveLoopSheetPosition(trackToSongTime(start))
+    const draftPos = autoPos ?? pdfViewerRef?.current?.getSheetPosition()
     const nextLoop: SavedLoop = {
       id: region.id,
       name,
-      start,
-      end,
+      start: trackToSongTime(start),
+      end: trackToSongTime(end),
       color,
       loopOn: true,
       sheetLinkDraft: draftPos ?? undefined,
@@ -2897,29 +3111,29 @@ export default function PlayerDock(props: PlayerDockProps) {
   const scrollToLoopMarker = useCallback(
     (loopId: string) => {
       const loop = savedLoopsRef.current.find((entry) => entry.id === loopId)
-      if (!loop?.sheetLink) {
+      if (!loop) return
+      // Recompute the position LIVE from the timing model (same as the marker overlay and
+      // playback), falling back to any stored link only if the model isn't ready. Trusting
+      // a stale stored sheetLink was sending clicks to a wildly wrong spot that play fixed.
+      const pos = resolveLoopSheetPosition(loop.start) ?? loop.sheetLink ?? loop.sheetLinkDraft
+      if (!pos) {
         return
       }
       const viewer = pdfViewerRef?.current ?? null
       if (!viewer) {
         return
       }
-      viewer.scrollToSheetPosition(loop.sheetLink, { behavior: 'smooth' })
+      viewer.scrollToSheetPosition(pos, { behavior: 'smooth' })
     },
-    [pdfViewerRef]
+    [pdfViewerRef, resolveLoopSheetPosition]
   )
 
   const activateLoopFromMarker = useCallback(
     (loopId: string) => {
+      // Re-clicking the active loop's marker/bar deselects it — same toggle the
+      // dock lane chips use, so the page-margin bars and rail behave identically.
       if (activeRegionIdRef.current === loopId) {
-        const ws = waveSurferRef.current
-        const region = regionMapRef.current.get(loopId)
-        if (ws && region) {
-          cancelLoopFades()
-          ws.setTime(region.start)
-          syncTakePlayback(region.start, true)
-          scheduleLoopTimers()
-        }
+        exitLoop()
         return
       }
       const loop = savedLoopsRef.current.find((entry) => entry.id === loopId)
@@ -2928,7 +3142,7 @@ export default function PlayerDock(props: PlayerDockProps) {
       }
       selectSavedLoop(loop)
     },
-    [cancelLoopFades, selectSavedLoop, syncTakePlayback]
+    [exitLoop, selectSavedLoop]
   )
 
   useEffect(() => {
@@ -2952,45 +3166,29 @@ export default function PlayerDock(props: PlayerDockProps) {
     onActiveLoopIdChange?.(activeRegionId)
   }, [activeRegionId, onActiveLoopIdChange])
 
-  // Populate callback refs so App/LoopSidebar can invoke PlayerDock internals
+  useEffect(() => {
+    onSelectedLoopIdChange?.(selectedLoopId)
+  }, [selectedLoopId, onSelectedLoopIdChange])
+
+  // Selecting a loop (showing its card) and activating it on the seekbar are
+  // the same action — the card always follows the active loop.
+  useEffect(() => {
+    setSelectedLoopId(activeRegionId)
+  }, [activeRegionId])
+
+  useEffect(() => {
+    store.save('practice:lanesVisible', lanesVisible)
+  }, [lanesVisible])
+
+  // Populate callback refs so SongView can invoke PlayerDock internals
   useEffect(() => {
     if (createLoopRef) createLoopRef.current = createRegion
     if (deleteLoopRef) deleteLoopRef.current = deleteSavedLoop
-    if (renameLoopRef) renameLoopRef.current = beginRenameLoop
     if (selectLoopRef) selectLoopRef.current = (id: string) => {
       const loop = savedLoopsRef.current.find((l) => l.id === id)
       if (loop) selectSavedLoop(loop)
     }
-    if (confirmDraftRef) confirmDraftRef.current = (id: string) => {
-      setSavedLoops((prev) =>
-        prev.map((l) =>
-          l.id === id && l.sheetLinkDraft
-            ? { ...l, sheetLink: l.sheetLinkDraft, sheetLinkDraft: undefined }
-            : l
-        )
-      )
-    }
-    if (remarkPositionRef) remarkPositionRef.current = (id: string) => {
-      toast('Scroll to the right measure, then tap Confirm', { duration: 3000 })
-      pendingRemarkLoopIdRef.current = id
-    }
-    if (markPositionRef) markPositionRef.current = (id: string) => {
-      const pos = pdfViewerRef?.current?.getSheetPosition()
-      if (!pos) return
-      setSavedLoops((prev) =>
-        prev.map((l) => (l.id === id ? { ...l, sheetLinkDraft: pos } : l))
-      )
-    }
-    if (toggleLoopRepeatRef) toggleLoopRepeatRef.current = (id: string) => {
-      setSavedLoops((prev) =>
-        prev.map((l) => (l.id === id ? { ...l, loopOn: !l.loopOn } : l))
-      )
-    }
-    if (toggleScrollOnRepeatRef) toggleScrollOnRepeatRef.current = (id: string) => {
-      setSavedLoops((prev) =>
-        prev.map((l) => (l.id === id ? { ...l, scrollOnRepeat: !l.scrollOnRepeat } : l))
-      )
-    }
+    if (exitLoopRef) exitLoopRef.current = () => exitLoop()
   })
 
   const seekBy = (delta: number) => {
@@ -3021,19 +3219,35 @@ export default function PlayerDock(props: PlayerDockProps) {
     waveSurferRef.current.playPause()
   }
 
-  const toggleLoop = () => {
+  // C3: one button toggles whichever global value applies to the current context —
+  // repeat-loop when a loop is active, repeat-song otherwise. `loopOn` (the live flag
+  // the playback engine reads) mirrors it.
+  const toggleRepeat = () => {
     cancelLoopFades()
     clearLoopTimers()
     const next = !loopOn
     setLoopOn(next)
-    if (!activeRegionIdRef.current) {
+    if (activeRegionIdRef.current) {
+      repeatLoopRef.current = next
+      setRepeatLoop(next)
+    } else {
+      repeatSongRef.current = next
+      setRepeatSong(next)
       globalLoopRef.current = next
-      return
     }
-    if (activeSavedLoop) {
-      setSavedLoops((loops) =>
-        loops.map((loop) => (loop.id === activeSavedLoop.id ? { ...loop, loopOn: next } : loop))
-      )
+  }
+
+  // D4: toggle the auto-scroll value for the current context (loop vs song), mirroring
+  // toggleRepeat. Both values are global per-song.
+  const toggleAutoScroll = () => {
+    if (activeRegionIdRef.current) {
+      const next = !autoScrollLoopRef.current
+      autoScrollLoopRef.current = next
+      setAutoScrollLoop(next)
+    } else {
+      const next = !autoScrollSongRef.current
+      autoScrollSongRef.current = next
+      setAutoScrollSong(next)
     }
   }
 
@@ -3085,54 +3299,143 @@ export default function PlayerDock(props: PlayerDockProps) {
   }
 
   const waveformShellClassName = audioReady
-    ? 'rounded-2xl border border-white/70 bg-white/60 p-2 shadow-lg shadow-black/10 backdrop-blur-md dark:border-slate-700/60 dark:bg-slate-900/60 dark:shadow-black/40'
-    : 'rounded-2xl border border-white/70 bg-white/60 p-2 shadow-lg shadow-black/10 backdrop-blur-md opacity-0 pointer-events-none dark:border-slate-700/60 dark:bg-slate-900/60 dark:shadow-black/40'
-  const dockClassName = audioReady
-    ? 'fixed inset-x-0 bottom-0 z-50 mb-[10px] bg-transparent'
-    : 'fixed inset-x-0 bottom-0 z-50 mb-[10px] bg-transparent pointer-events-none'
+    ? 'relative rounded-2xl border border-white/70 bg-white/60 px-3 py-2 shadow-lg shadow-black/10 backdrop-blur-md dark:border-slate-700/60 dark:bg-slate-900/60 dark:shadow-black/40'
+    : 'relative rounded-2xl border border-white/70 bg-white/60 px-3 py-2 shadow-lg shadow-black/10 backdrop-blur-md opacity-0 pointer-events-none dark:border-slate-700/60 dark:bg-slate-900/60 dark:shadow-black/40'
+  // The outer wrapper spans full width but is click-through, so its empty side
+  // areas don't sit "in front of" the edge rail and steal its drags. Only the
+  // centered content opts back into pointer events.
+  const dockClassName =
+    'pointer-events-none fixed inset-x-0 bottom-0 z-50 mb-[10px] bg-transparent'
 
   return (
     <div className={dockClassName}>
-      <div className="relative mx-auto w-full max-w-5xl px-4 pb-[calc(env(safe-area-inset-bottom)+0.5rem)] pt-4">
+      <div className="pointer-events-auto relative mx-auto w-full max-w-5xl px-4 pb-[calc(env(safe-area-inset-bottom)+0.5rem)] pt-4">
         <div className={waveformShellClassName} aria-hidden={!audioReady}>
-          <div
-            ref={containerRef}
-            id="waveform"
-              className="w-full transition-[height] duration-200 ease-out motion-reduce:transition-none"
-              style={{ height: waveformHeight }}
-              data-mode={transportMode}
-              data-loop-on={loopOn}
-              data-loop-active={activeRegionId ? 'true' : 'false'}
-              data-ready={isReady ? 'true' : 'false'}
-              onPointerEnter={handleWaveformPointerEnter}
-              onPointerLeave={handleWaveformPointerLeave}
-          />
-        </div>
+          {/* One bar: the control cluster sits left, the waveform fills the rest of
+              the row, and the loop lane nests under the waveform column so its chips
+              stay aligned with the waveform regions above them. */}
+          <div className="flex items-start gap-3">
+            {audioReady && (
+              <div className="flex min-h-[40px] items-center">
+                <TransportBar
+                  mode={transportMode}
+                  containerRef={transportRef}
+                  onPointerEnter={handleTransportPointerEnter}
+                  onPointerLeave={handleTransportPointerLeave}
+                  onPointerDown={handleTransportPointerDown}
+                  onPointerUp={handleTransportPointerUp}
+                  onPointerCancel={handleTransportPointerCancel}
+                  onSeekExtensionChange={handleSeekExtensionChange}
+                  isPlaying={isPlaying}
+                  playbackRate={playbackRate}
+                  balance={balance}
+                  mono={mono}
+                  isStereoSource={sourceChannelCount === null || sourceChannelCount > 1}
+                  transpose={transpose}
+                  seekBy={seekBy}
+                  togglePlay={togglePlay}
+                  setPlaybackRate={setPlaybackRate}
+                  setBalance={setBalance}
+                  setMono={setMono}
+                  setTranspose={setTranspose}
+                  repeatActive={loopOn}
+                  onToggleRepeat={toggleRepeat}
+                  autoScrollActive={autoScrollActive}
+                  autoScrollAvailable={anchors.length > 0}
+                  autoScrollSuspended={autoScrollSuspended}
+                  onResumeAutoScroll={() => setAutoScrollSuspended(false)}
+                  onToggleAutoScroll={toggleAutoScroll}
+                  tracks={tracks}
+                  activeTrackId={activeTrackId}
+                  onSelectTrack={onSelectTrack}
+                  onManageTracks={onManageTracks}
+                />
+              </div>
+            )}
 
-        {audioReady && (
-          <TransportBar
-            mode={transportMode}
-            containerRef={transportRef}
-            onPointerEnter={handleTransportPointerEnter}
-            onPointerLeave={handleTransportPointerLeave}
-            onPointerDown={handleTransportPointerDown}
-            onPointerUp={handleTransportPointerUp}
-            onPointerCancel={handleTransportPointerCancel}
-            onSeekExtensionChange={handleSeekExtensionChange}
-            isPlaying={isPlaying}
-            playbackRate={playbackRate}
-            balance={balance}
-            mono={mono}
-            isStereoSource={sourceChannelCount === null || sourceChannelCount > 1}
-            transpose={transpose}
-            seekBy={seekBy}
-            togglePlay={togglePlay}
-            setPlaybackRate={setPlaybackRate}
-            setBalance={setBalance}
-            setMono={setMono}
-            setTranspose={setTranspose}
-          />
-        )}
+            {/* Waveform + loop lane share one inner column so the lane chips stay
+                aligned with the waveform regions; Add loop sits to the right of
+                the waveform, vertically centered on it. */}
+            <div className="flex min-w-0 flex-1 items-start gap-2">
+              <div className="flex min-w-0 flex-1 flex-col">
+                <div className="flex min-h-[40px] items-center">
+                  <div
+                    ref={containerRef}
+                    id="waveform"
+                    className="w-full transition-[height] duration-200 ease-out motion-reduce:transition-none"
+                    style={{ height: waveformHeight }}
+                    data-mode={transportMode}
+                    data-loop-on={loopOn}
+                    data-loop-active={activeRegionId ? 'true' : 'false'}
+                    data-ready={isReady ? 'true' : 'false'}
+                    onPointerEnter={handleWaveformPointerEnter}
+                    onPointerLeave={handleWaveformPointerLeave}
+                  />
+                </div>
+
+                {audioReady && savedLoops.length > 0 && (
+                  <div className="relative">
+                  <LoopLaneStrip
+                    loops={savedLoops}
+                    duration={duration}
+                    activeLoopId={activeRegionId}
+                    lanesVisible={lanesVisible}
+                    chipInset={0}
+                    onSelect={(id) => {
+                      if (activeRegionIdRef.current === id) {
+                        exitLoop()
+                      } else {
+                        const loop = savedLoopsRef.current.find((l) => l.id === id)
+                        if (loop) selectSavedLoop(loop)
+                      }
+                    }}
+                    onRename={saveLoopName}
+                    onDelete={deleteSavedLoop}
+                    onExpand={() => setLanesVisible(true)}
+                    onCollapse={() => setLanesVisible(false)}
+                  />
+
+                  {/* Expand/collapse — sits at the right end of the lane, even with
+                      the collapsed peek. */}
+                  <button
+                    type="button"
+                    onClick={() => setLanesVisible((v) => !v)}
+                    className="absolute right-0 top-0 z-10 flex h-5 w-5 items-center justify-center rounded-full text-slate-400 transition hover:bg-black/5 hover:text-slate-600"
+                    aria-label={lanesVisible ? 'Hide loop lanes' : 'Show loop lanes'}
+                    title={lanesVisible ? 'Hide loops' : 'Show loops'}
+                  >
+                    {lanesVisible ? (
+                      <ChevronUp size={12} strokeWidth={2.5} />
+                    ) : (
+                      <ChevronDown size={12} strokeWidth={2.5} />
+                    )}
+                  </button>
+                </div>
+              )}
+              </div>
+
+              {audioReady && (
+                <div className="flex min-h-[40px] shrink-0 items-center">
+                  <button
+                    type="button"
+                    onClick={activeRegionId ? exitLoop : () => createLoopRef?.current?.()}
+                    aria-label={activeRegionId ? 'Exit loop' : 'Add loop'}
+                    title={activeRegionId ? 'Exit loop' : 'Add loop'}
+                    className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-full border border-[#4F7F7A]/55 bg-black/5 text-[#0b1220] shadow-sm shadow-black/10 backdrop-blur-sm transition hover:bg-black/10 active:bg-black/15 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#4F7F7A]/40 focus-visible:ring-offset-2 focus-visible:ring-offset-white/80 ${
+                      activeRegionId
+                        ? '!border-[#4F7F7A] !bg-[#4F7F7A]/25 hover:!bg-[#4F7F7A]/30 active:!bg-[#4F7F7A]/35'
+                        : ''
+                    }`}
+                  >
+                    {activeRegionId
+                      ? <XIcon size={15} strokeWidth={2.5} />
+                      : <InfinityIcon size={16} strokeWidth={2.5} />}
+                  </button>
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
 
         {audioReady && countdownOverlayPresence.isMounted && (
           <div
@@ -3278,8 +3581,8 @@ export default function PlayerDock(props: PlayerDockProps) {
       {audioReady && nameModalOpen && (
         <div className="fixed inset-0 z-[9998] flex items-center justify-center bg-slate-950/40 px-4">
           <div className="w-full max-w-sm rounded-2xl border border-slate-200 bg-white p-5 shadow-xl">
-            <h3 className="text-lg font-semibold text-slate-900">{nameModalTitle}</h3>
-            <p className="mt-1 text-sm text-slate-500">{nameModalDescription}</p>
+            <h3 className="text-lg font-semibold text-slate-900">Name this loop</h3>
+            <p className="mt-1 text-sm text-slate-500">Give this region a memorable name.</p>
             <input
               className="mt-4 w-full rounded-xl border border-slate-200 px-3 py-2 text-slate-900 shadow-sm focus:border-[#4F7F7A] focus:outline-none"
               value={pendingLoopName}
@@ -3307,7 +3610,7 @@ export default function PlayerDock(props: PlayerDockProps) {
                 type="button"
                 onClick={confirmSaveRegion}
               >
-                {nameModalActionLabel}
+                Save loop
               </button>
             </div>
           </div>

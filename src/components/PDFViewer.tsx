@@ -8,11 +8,31 @@ import {
   useState,
   type MutableRefObject,
 } from 'react'
-import { AudioLines } from 'lucide-react'
 import { Document, Page } from 'react-pdf'
 import type { PDFDocumentProxy, PDFPageProxy } from 'pdfjs-dist'
+import { detectSystems, isLikelyScanned, bandForY, type SystemBand } from '../lib/detectSystems'
+import { adaptiveAnchorFraction, advanceFollowTarget, cappedScrollStep, EASE, USER_QUIET_MS } from '../lib/scrollMotion'
+import EdgeScrubberRail from './EdgeScrubberRail'
+import { packIntervals } from '../lib/assignLanes'
 
-const PDF_URL = '/sheetmusic.pdf'
+// Debug: overlay detected system bands on each page. Flip to true to tune.
+const DEBUG_SYSTEMS = false
+// Dev-only: expose the detector on window for quick per-page verification in the
+// browser console (stripped from production builds).
+if (import.meta.env.DEV && typeof window !== 'undefined') {
+  const w = window as unknown as {
+    __detectSystems?: typeof detectSystems
+    __isLikelyScanned?: typeof isLikelyScanned
+  }
+  w.__detectSystems = detectSystems
+  w.__isLikelyScanned = isLikelyScanned
+}
+
+// Fallback when no `pdfUrl` prop is supplied (single-song legacy / dev). Override
+// with ?pdf=/other.pdf to test another score without overwriting the fixture.
+const DEFAULT_PDF_URL =
+  (typeof window !== 'undefined' && new URLSearchParams(window.location.search).get('pdf')) ||
+  '/sheetmusic.pdf'
 const RESIZE_DEBOUNCE_MS = 120
 const MIN_ZOOM = 0.6
 const MAX_ZOOM = 2
@@ -20,6 +40,23 @@ const DEFAULT_DESKTOP_ZOOM = 1.4
 const ZOOM_STEP = 0.1
 const SCROLL_PADDING_RATIO = 0.05
 const SCROLL_PADDING_PX = 32
+// Page-margin loop bars (the 90°-rotated rhyme of the edge-rail bands).
+const PAGE_BAR_W = 6
+// Gap between sub-lane bars — wide enough that the ~3.5px selected ring on one bar
+// doesn't bleed into its neighbour.
+const PAGE_BAR_GAP = 5
+const PAGE_BAR_MIN_PX = 8
+// Bars sit just OFF the page's left edge, in the margin.
+const PAGE_BAR_OFFSET = 5
+// Chip rests at its bar's top; only sticks once the bar scrolls within this many px
+// of the viewport top (small, so chips stay top-aligned to their bars at rest).
+const PAGE_CHIP_STICKY_TOP = 12
+// When multiple chips are sticky at the top simultaneously, each one offsets by this
+// amount so they stack vertically instead of physically overlapping. ~chip height + gap.
+const CHIP_STACK_STEP = 22
+// Chips float to the LEFT of their bar; the scroll handler appends an optional translateY
+// for resting de-overlap, so this base must be shared between the handler and the render.
+const CHIP_BASE_TRANSFORM = 'translateX(calc(-100% - 2px))'
 
 const clamp = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value))
 const getPageHeight = (page: HTMLElement) => {
@@ -29,10 +66,29 @@ const getPageHeight = (page: HTMLElement) => {
 
 type PDFViewerProps = {
   scrollContainerRef?: MutableRefObject<HTMLDivElement | null>
+  /** PDF source for the active song. Defaults to the legacy /sheetmusic.pdf. */
+  pdfUrl?: string
   sheetMarkers?: SheetMarker[]
   onMarkerClick?: (loopId: string) => void
   onPageChange?: (page: number, numPages: number) => void
   onZoomStateChange?: (zoomOutDisabled: boolean, zoomInDisabled: boolean) => void
+  /** Fired once when system bands are first available (PDF has rendered enough pages). */
+  onSystemBandsReady?: () => void
+  /** Permanent sync-anchor overlay for debugging the alignment (dev only). */
+  syncAnchors?: SyncAnchorOverlay[]
+}
+
+/** One sync anchor positioned for the permanent debug overlay. */
+export type SyncAnchorOverlay = {
+  time: number
+  page: number
+  xWithinPageRatio?: number
+  yWithinPageRatio: number
+  /** The matched lyric (score) word. */
+  text: string
+  /** The Whisper word that matched it. */
+  heard?: string
+  confidence: number
 }
 
 export type SheetPosition = {
@@ -47,7 +103,39 @@ export type SheetMarker = {
   name: string
   color: string
   sheetLink: SheetPosition
+  /** Score position of the loop's END (timing-model resolved), when available.
+   * Drives the proportional extent of the edge-rail band + page-margin bar. */
+  sheetLinkEnd?: SheetPosition
+  /** Active (selected) loop — page-margin bar shows a selection ring. */
+  active?: boolean
   isDraft?: boolean
+}
+
+export type SyncHighlight = {
+  page: number
+  yWithinPageRatio: number
+  text: string
+  confidence: number
+  time: number
+}
+
+/**
+ * One frame's worth of "where to scroll", produced by PlayerDock's follow effect
+ * from the timing model and consumed by the rAF follow loop. Pixel-agnostic: the
+ * loop converts these page/ratio positions to scrollTop itself. `current`/`next`
+ * are the playing system's top and the next system's top; `blend` (0…1) ramps
+ * between them; `systemHeightRatio` keeps the current system fully on screen.
+ */
+export type PlayheadAnchor = {
+  current: SheetPosition
+  next: SheetPosition
+  blend: number
+  /** Piece-level steadiness (timing model `tempoStability`, 0…1) → vertical anchor. Stable
+   * by design (not a per-frame value) so the look-ahead framing doesn't breathe/jitter. */
+  stability: number
+  systemHeightRatio: number
+  /** Audio time (s) this anchor was sampled at — lets the loop detect real seeks. */
+  time: number
 }
 
 export type PDFViewerHandle = {
@@ -56,6 +144,14 @@ export type PDFViewerHandle = {
     pos: SheetPosition,
     opts?: { behavior?: 'auto' | 'smooth' }
   ) => void
+  setSyncHighlight: (h: SyncHighlight | null) => void
+  /** Detected system bands per page (1-based), for Score Sync's system-top mapping. */
+  getSystemBands: () => Record<number, SystemBand[]>
+  /** Start the continuous playback auto-scroll; `getAnchor` is polled once per frame.
+   * `onManualScroll` fires once when the user scrolls by hand while following is active. */
+  startPlayheadFollow: (getAnchor: () => PlayheadAnchor | null, onManualScroll?: () => void) => void
+  /** Stop the continuous playback auto-scroll. */
+  stopPlayheadFollow: () => void
   zoomIn: () => void
   zoomOut: () => void
 }
@@ -90,7 +186,7 @@ const useMediaQuery = (query: string) => {
 }
 
 const PDFViewer = forwardRef<PDFViewerHandle, PDFViewerProps>(function PDFViewer(
-  { scrollContainerRef, sheetMarkers, onMarkerClick, onPageChange, onZoomStateChange }: PDFViewerProps,
+  { scrollContainerRef, pdfUrl = DEFAULT_PDF_URL, sheetMarkers, onMarkerClick, onPageChange, onZoomStateChange, onSystemBandsReady, syncAnchors }: PDFViewerProps,
   ref
 ) {
   const internalContainerRef = useRef<HTMLDivElement | null>(null)
@@ -103,11 +199,41 @@ const PDFViewer = forwardRef<PDFViewerHandle, PDFViewerProps>(function PDFViewer
   const [containerWidth, setContainerWidth] = useState(0)
   const [pageWidth, setPageWidth] = useState<number | null>(null)
   const [numPages, setNumPages] = useState(0)
+  const [syncHighlight, setSyncHighlight] = useState<SyncHighlight | null>(null)
   const [currentPage, setCurrentPage] = useState(1)
   const currentPageRef = useRef(1)
   const [zoom, setZoom] = useState(1)
   const [error, setError] = useState<string | null>(null)
-  const [markerOffsets, setMarkerOffsets] = useState<Record<string, number>>({})
+  const [systemBands, setSystemBands] = useState<Record<number, SystemBand[]>>({})
+  const systemBandsRef = useRef<Record<number, SystemBand[]>>({})
+  const systemBandsReadyFiredRef = useRef(false)
+  // Pages whose canvas has finished rendering — once all pages are painted,
+  // getSystemBands() returns a COMPLETE map, so we fire onSystemBandsReady then
+  // (the production trigger; the systemBands-state effect below is debug-only).
+  const renderedPagesRef = useRef<Set<number>>(new Set())
+  // Chip DOM refs — direct DOM updates on scroll (no React state) for dynamic stacking.
+  const chipRefsMapRef = useRef<Map<string, HTMLSpanElement>>(new Map())
+  const updateChipSlotsRef = useRef<(() => void) | null>(null)
+
+  // Continuous playback auto-scroll (see startPlayheadFollow). The rAF loop polls
+  // followGetAnchorRef each frame and eases container.scrollTop toward the target.
+  const followGetAnchorRef = useRef<(() => PlayheadAnchor | null) | null>(null)
+  const followOnManualScrollRef = useRef<(() => void) | null>(null)
+  const followRafRef = useRef<number | null>(null)
+  // Float scrollTop we maintain (writes are rounded — keeps slow scrolls from
+  // stalling under integer rounding) and the timestamp until which a manual scroll
+  // gesture suspends following.
+  const followScrollTopRef = useRef<number | null>(null)
+  const followUserUntilRef = useRef(0)
+  // Timestamp of the previous follow frame, for the slew-rate limit's real dt.
+  const followLastFrameRef = useRef<number | null>(null)
+  // Monotonic-scroll ratchet: the running-max target, plus the last audio time, so a
+  // real backward/forward seek resets it while frac wobble can't reverse the scroll.
+  const followMaxTargetRef = useRef<number | null>(null)
+  const followLastTimeRef = useRef<number | null>(null)
+  // Last viewport size — a change (resize / orientation / zoom) reflows the PDF and
+  // invalidates every cached pixel target, so we drop the ratchet and resync.
+  const followGeomRef = useRef<{ w: number; h: number } | null>(null)
 
   const isTouch = useMediaQuery('(max-width: 1024px), (pointer: coarse)')
 
@@ -166,6 +292,9 @@ const PDFViewer = forwardRef<PDFViewerHandle, PDFViewerProps>(function PDFViewer
 
   const handleDocumentLoadSuccess = useCallback((documentProxy: PDFDocumentProxy) => {
     setError(null)
+    // New document → reset the render tally so the bands-ready signal re-fires.
+    renderedPagesRef.current = new Set()
+    systemBandsReadyFiredRef.current = false
     setNumPages(documentProxy.numPages)
     const next =
       currentPageRef.current > documentProxy.numPages ? 1 : currentPageRef.current
@@ -198,6 +327,24 @@ const PDFViewer = forwardRef<PDFViewerHandle, PDFViewerProps>(function PDFViewer
     setError(renderError.message || 'Failed to render PDF page')
   }, [])
 
+  // Fire onSystemBandsReady() once every page's canvas has painted. At that point
+  // getSystemBands() returns a complete bands map, so consumers (PlayerDock's timing
+  // model) rebuild loop-marker positions from the full document — not a partial map.
+  const handlePageRendered = useCallback(
+    (pageNumber: number) => {
+      renderedPagesRef.current.add(pageNumber)
+      if (
+        !systemBandsReadyFiredRef.current &&
+        numPages > 0 &&
+        renderedPagesRef.current.size >= numPages
+      ) {
+        systemBandsReadyFiredRef.current = true
+        onSystemBandsReady?.()
+      }
+    },
+    [numPages, onSystemBandsReady]
+  )
+
   const fitWidthScale = useMemo(() => {
     if (!containerWidth || !pageWidth) {
       return 1
@@ -220,18 +367,83 @@ const PDFViewer = forwardRef<PDFViewerHandle, PDFViewerProps>(function PDFViewer
   const zoomInDisabled = !canZoom || zoom >= MAX_ZOOM - 0.001
   const devicePixelRatio = typeof window !== 'undefined' ? window.devicePixelRatio || 1 : 1
   const pages = useMemo(() => Array.from({ length: numPages }, (_, index) => index + 1), [numPages])
-  const markersByPage = useMemo(() => {
-    const map = new Map<number, SheetMarker[]>()
-    if (!sheetMarkers) {
+  // Page-margin loop bars: a loop becomes a vertical bar spanning its start→end Y
+  // on each page it touches (first page: start→bottom, interior: full, last:
+  // top→end). Overlapping bars on a page are packed into sub-lanes so they don't
+  // occlude — the 90°-rotated rhyme of the edge-rail bands. Ratios here are
+  // page-height-independent; converted to px at render time.
+  const marginBars = useMemo(() => {
+    type Bar = {
+      marker: SheetMarker
+      startPage: number
+      startRatio: number
+      endPage: number
+      endRatio: number
+      subLane: number
+      /** Bar stacking z (bars layer). */
+      z: number
+      /** Chip stacking z (chip layer, always above all bars). */
+      chipZ: number
+      /** Position in the input (audio-timeline) order — drives chip stack offset. */
+      audioIdx: number
+    }
+    if (!sheetMarkers) return [] as Bar[]
+    const bars: Bar[] = sheetMarkers.map((marker) => {
+      const startPage = marker.sheetLink.page
+      const startRatio = Number.isFinite(marker.sheetLink.yWithinPageRatio)
+        ? (marker.sheetLink.yWithinPageRatio as number)
+        : 0
+      const end = marker.sheetLinkEnd
+      let endPage = end?.page ?? startPage
+      let endRatio = Number.isFinite(end?.yWithinPageRatio)
+        ? (end!.yWithinPageRatio as number)
+        : startRatio
+      if (!end || endPage < startPage || (endPage === startPage && endRatio <= startRatio)) {
+        endPage = startPage
+        endRatio = startRatio // point loop → min-height bar at render
+      }
+      return { marker, startPage, startRatio, endPage, endRatio, subLane: 0, z: 0, chipZ: 0, audioIdx: 0 }
+    })
+    // One global sub-lane assignment (page-major coordinate) so a loop keeps the
+    // same column on every page it crosses — no per-page swapping.
+    const lanes = packIntervals(
+      bars.map((b) => ({
+        id: b.marker.id,
+        start: b.startPage + b.startRatio,
+        end: Math.max(b.endPage + b.endRatio, b.startPage + b.startRatio + 0.001),
+      }))
+    )
+    // Use INPUT ARRAY ORDER (= audio start-time order) for z: the loop that starts
+    // earlier in the song gets higher z, matching the user's mental model.
+    // chipZ is in a separate band (40+) so chips always paint above all bars (20-).
+    bars.forEach((b, audioIdx) => {
+      b.subLane = lanes[b.marker.id] ?? 0
+      b.z = 20 - audioIdx
+      b.chipZ = 40 - audioIdx
+      b.audioIdx = audioIdx
+    })
+    return bars
+  }, [sheetMarkers])
+
+  // Stable refs updated synchronously each render so scroll effects always see the
+  // latest values without needing to be re-registered as dependencies.
+  const marginBarsRef = useRef(marginBars)
+  marginBarsRef.current = marginBars
+  // docYForPositionRef is set after docYForPosition is defined below.
+  const docYForPositionRef = useRef<null | ((pos: SheetPosition) => number | null)>(null)
+
+  const syncAnchorsByPage = useMemo(() => {
+    const map = new Map<number, SyncAnchorOverlay[]>()
+    if (!syncAnchors) {
       return map
     }
-    sheetMarkers.forEach((marker) => {
-      const list = map.get(marker.sheetLink.page) ?? []
-      list.push(marker)
-      map.set(marker.sheetLink.page, list)
+    syncAnchors.forEach((anchor) => {
+      const list = map.get(anchor.page) ?? []
+      list.push(anchor)
+      map.set(anchor.page, list)
     })
     return map
-  }, [sheetMarkers])
+  }, [syncAnchors])
 
   const resolvePageElement = useCallback(
     (pageNumber: number, container: HTMLElement) =>
@@ -305,6 +517,239 @@ const PDFViewer = forwardRef<PDFViewerHandle, PDFViewerProps>(function PDFViewer
     [containerRef, currentPage, getPageOffsetTop, numPages, resolvePageElement, resolveYWithinPagePx]
   )
 
+  // Absolute scroll-Y (within the scroll container) of a sheet position — the same
+  // page-offset + within-page math scrollToSheetPosition uses, minus the padding.
+  // The follow loop interpolates between two of these.
+  const docYForPosition = useCallback(
+    (pos: SheetPosition): number | null => {
+      const container = containerRef.current
+      if (!container) return null
+      const pageNumber = Number.isFinite(pos.page) ? pos.page : currentPage || 1
+      const safePage = numPages ? Math.min(Math.max(1, pageNumber), numPages) : Math.max(1, pageNumber)
+      const page = resolvePageElement(safePage, container)
+      const offset = resolveYWithinPagePx(pos, page)
+      return page ? getPageOffsetTop(page, container) + offset : offset
+    },
+    [containerRef, currentPage, getPageOffsetTop, numPages, resolvePageElement, resolveYWithinPagePx]
+  )
+
+  // Keep the docY ref current so the scroll effect always calls the latest version.
+  docYForPositionRef.current = docYForPosition
+
+  // One frame of the continuous auto-scroll: keep the playing system's top — ramped
+  // toward the next system's top by `blend` — pinned at an adaptive fraction down
+  // the viewport, easing scrollTop toward it. Yields when the user is scrolling.
+  const runFollowFrame = useCallback(() => {
+    const container = containerRef.current
+    const getAnchor = followGetAnchorRef.current
+    if (!container || !getAnchor) return
+    const now = typeof performance !== 'undefined' ? performance.now() : Date.now()
+    // Real frame dt (clamped) for the slew-rate limit — robust to dropped/backgrounded frames.
+    const dtSec = followLastFrameRef.current != null ? Math.min(0.1, (now - followLastFrameRef.current) / 1000) : 1 / 60
+    followLastFrameRef.current = now
+    let desired = followScrollTopRef.current ?? container.scrollTop
+    // A viewport resize / orientation change / zoom reflows the PDF, so every cached
+    // pixel target (and the ratchet's running-max) is stale. Drop them and resync so the
+    // next frame snaps to the correct line in the NEW geometry — and so the reflow's own
+    // scrollTop shift below isn't mistaken for a manual gesture.
+    const gw = container.clientWidth
+    const gh = container.clientHeight
+    const geom = followGeomRef.current
+    if (!geom || geom.w !== gw || geom.h !== gh) {
+      followGeomRef.current = { w: gw, h: gh }
+      followMaxTargetRef.current = null
+      followLastTimeRef.current = null
+      desired = container.scrollTop
+    }
+    // scrollTop moved away from our last write ⇒ a manual gesture / scrollbar drag — yield.
+    if (Math.abs(container.scrollTop - Math.round(desired)) > 2) {
+      followUserUntilRef.current = now + USER_QUIET_MS
+      desired = container.scrollTop
+    }
+    const anchor = getAnchor()
+    if (anchor && now >= followUserUntilRef.current) {
+      const curY = docYForPosition(anchor.current)
+      const nextY = docYForPosition(anchor.next)
+      if (curY != null && nextY != null) {
+        const viewport = container.clientHeight
+        const page = resolvePageElement(anchor.current.page, container)
+        const pageH = page ? getPageHeight(page) : 0
+        const systemHeightFrac =
+          pageH > 0 && viewport > 0 ? (anchor.systemHeightRatio * pageH) / viewport : 0
+        // Anchor fraction from the piece's STABLE steadiness (not a per-frame value), so
+        // it can't wobble; the small per-system step is smoothed by the easing below.
+        const frac = adaptiveAnchorFraction(anchor.stability, systemHeightFrac)
+        const anchorY = curY + (nextY - curY) * anchor.blend
+        const maxTop = Math.max(0, container.scrollHeight - viewport)
+        const rawTarget = clamp(anchorY - viewport * frac, 0, maxTop)
+        // Keep forward play monotonic; let real (time-based) seeks reposition. See
+        // advanceFollowTarget — this is what stops the anchor-fraction wobble from
+        // reading as an up/down jitter.
+        const { target, seeked, state } = advanceFollowTarget(rawTarget, anchor.time, {
+          maxTarget: followMaxTargetRef.current,
+          lastTime: followLastTimeRef.current,
+        })
+        followMaxTargetRef.current = state.maxTarget
+        followLastTimeRef.current = state.lastTime
+        if (seeked) {
+          desired = target // a real audio seek (loop/skip) repositions instantly
+        } else {
+          // Ease toward the target, but never advance faster than one system per
+          // MIN_SECONDS_PER_SYSTEM — so a mistimed-early anchor cluster glides past at
+          // tempo instead of yanking the sung measure off the top of the viewport.
+          const systemPx = anchor.systemHeightRatio * pageH
+          desired += cappedScrollStep((target - desired) * EASE, systemPx, dtSec)
+        }
+        container.scrollTop = Math.round(desired)
+      }
+    } else {
+      // Idle (no anchor yet) or yielding to the user: track scrollTop, don't fight it,
+      // and drop the ratchet so following resumes from wherever the user left off.
+      desired = container.scrollTop
+      followMaxTargetRef.current = null
+      followLastTimeRef.current = null
+    }
+    followScrollTopRef.current = desired
+  }, [containerRef, docYForPosition, resolvePageElement])
+
+  // Keep a stable loop fn so dep changes in the body don't tear down the rAF chain.
+  const runFollowFrameRef = useRef(runFollowFrame)
+  useEffect(() => {
+    runFollowFrameRef.current = runFollowFrame
+  }, [runFollowFrame])
+  const followLoop = useCallback(() => {
+    runFollowFrameRef.current()
+    followRafRef.current = window.requestAnimationFrame(followLoop)
+  }, [])
+
+  const startPlayheadFollow = useCallback(
+    (getAnchor: () => PlayheadAnchor | null, onManualScroll?: () => void) => {
+      followGetAnchorRef.current = getAnchor
+      followOnManualScrollRef.current = onManualScroll ?? null
+      if (followRafRef.current == null) {
+        followScrollTopRef.current = containerRef.current?.scrollTop ?? null
+        followMaxTargetRef.current = null
+        followLastTimeRef.current = null
+        followGeomRef.current = null
+        followRafRef.current = window.requestAnimationFrame(followLoop)
+      }
+    },
+    [containerRef, followLoop]
+  )
+
+  const stopPlayheadFollow = useCallback(() => {
+    if (followRafRef.current != null) {
+      window.cancelAnimationFrame(followRafRef.current)
+      followRafRef.current = null
+    }
+    followGetAnchorRef.current = null
+    followOnManualScrollRef.current = null
+  }, [])
+
+  // Suspend following the moment the user scrolls by hand (wheel / touch / nav keys).
+  useEffect(() => {
+    const container = containerRef.current
+    if (!container) return
+    const mark = () => {
+      followUserUntilRef.current =
+        (typeof performance !== 'undefined' ? performance.now() : Date.now()) + USER_QUIET_MS
+      // While actively following, a hand-scroll suspends auto-scroll for the rest of
+      // this listen (the parent decides re-enable on pause/seek/loop). Fire once: the
+      // parent clears `onManualScroll` via stopPlayheadFollow when it tears the loop down.
+      if (followRafRef.current != null) followOnManualScrollRef.current?.()
+    }
+    const onKey = (e: KeyboardEvent) => {
+      if (['PageUp', 'PageDown', 'ArrowUp', 'ArrowDown', 'Home', 'End', ' '].includes(e.key)) mark()
+    }
+    container.addEventListener('wheel', mark, { passive: true })
+    container.addEventListener('touchstart', mark, { passive: true })
+    container.addEventListener('touchmove', mark, { passive: true })
+    window.addEventListener('keydown', onKey)
+    return () => {
+      container.removeEventListener('wheel', mark)
+      container.removeEventListener('touchstart', mark)
+      container.removeEventListener('touchmove', mark)
+      window.removeEventListener('keydown', onKey)
+    }
+  }, [containerRef])
+
+  // Stop the loop on unmount.
+  useEffect(() => stopPlayheadFollow, [stopPlayheadFollow])
+
+  // Re-run chip slot assignment whenever the loop set changes (no scroll needed).
+  useEffect(() => {
+    updateChipSlotsRef.current?.()
+  }, [marginBars])
+
+  // Direct-DOM chip slot updater — reads marginBarsRef + docYForPositionRef (stable
+  // refs updated inline each render) and writes style.top on each chip span element
+  // directly, bypassing React re-renders entirely. A bar is "active" when its top has
+  // scrolled above the viewport; chips are assigned sequential slots so they stack.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  useEffect(() => {
+    const container = containerRef.current
+    if (!container) return
+
+    const updateChipSlots = () => {
+      const st = container.scrollTop
+      const bars = marginBarsRef.current
+      const getDocY = docYForPositionRef.current
+      if (!getDocY) return
+
+      const stickyLine = st + PAGE_CHIP_STICKY_TOP
+      // Classify each loop by its TRUE span against the viewport:
+      // - PINNED:  viewport is inside the loop (start at/above the sticky line, end still
+      //            below the top) → chip sticks at the top, stacked with other pinned chips.
+      // - RESTING: loop is approaching from below (start below the sticky line) → chip sits
+      //            at its bar top, nudged down only to avoid colliding with a neighbour.
+      // - else:    loop has fully scrolled past (end above the top) → leave it alone.
+      const pinned: { bar: (typeof bars)[number]; docTop: number }[] = []
+      const resting: { bar: (typeof bars)[number]; docTop: number }[] = []
+      for (const bar of bars) {
+        const docTop = getDocY(bar.marker.sheetLink)
+        if (docTop == null) continue
+        const docEnd = bar.marker.sheetLinkEnd ? getDocY(bar.marker.sheetLinkEnd) : docTop
+        const bottom = docEnd ?? docTop
+        if (docTop <= stickyLine && bottom >= st) {
+          pinned.push({ bar, docTop })
+        } else if (docTop > stickyLine) {
+          resting.push({ bar, docTop })
+        }
+      }
+
+      const chipMap = chipRefsMapRef.current
+
+      // Pinned chips: sequential slots in start-time (audioIdx) order, no vertical nudge.
+      pinned.sort((a, b) => a.bar.audioIdx - b.bar.audioIdx)
+      pinned.forEach(({ bar }, slotIdx) => {
+        const elem = chipMap.get(bar.marker.id)
+        if (!elem) return
+        elem.style.top = `${PAGE_CHIP_STICKY_TOP + slotIdx * CHIP_STACK_STEP}px`
+        elem.style.transform = CHIP_BASE_TRANSFORM
+      })
+
+      // Resting chips: greedily push down any that lands within one step of the previous,
+      // applied as a translateY (purely visual — sticky stays disengaged below the line).
+      resting.sort((a, b) => a.docTop - b.docTop)
+      let prevY = -Infinity
+      for (const { bar, docTop } of resting) {
+        const y = Math.max(docTop, prevY + CHIP_STACK_STEP)
+        prevY = y
+        const elem = chipMap.get(bar.marker.id)
+        if (!elem) continue
+        elem.style.transform = `${CHIP_BASE_TRANSFORM} translateY(${y - docTop}px)`
+      }
+    }
+
+    updateChipSlotsRef.current = updateChipSlots
+    container.addEventListener('scroll', updateChipSlots, { passive: true })
+    updateChipSlots()
+    return () => {
+      container.removeEventListener('scroll', updateChipSlots)
+      updateChipSlotsRef.current = null
+    }
+  }, [containerRef])
+
   const setPageRef = useCallback(
     (pageNumber: number) => (node: HTMLDivElement | null) => {
       const observer = observerRef.current
@@ -325,89 +770,54 @@ const PDFViewer = forwardRef<PDFViewerHandle, PDFViewerProps>(function PDFViewer
     []
   )
 
+  // Debug overlay only: eagerly computes bands for every page so they can be
+  // drawn. Real (Score Sync) consumers use getSystemBands() which computes
+  // lazily on demand — so a normal load does NO detection work.
   useEffect(() => {
-    if (!sheetMarkers || sheetMarkers.length === 0) {
-      setMarkerOffsets({})
+    if (!DEBUG_SYSTEMS || numPages === 0) {
       return
     }
-    let rafId = 0
     let cancelled = false
-    const candidates = [-40, -32, -24, -16, -8, 0, 8, 12]
-    const sampleX = 12
-    const sampleWidth = 18
-    const sampleHeight = 18
-    const computeOffsets = () => {
-      const nextOffsets: Record<string, number> = {}
-      sheetMarkers.forEach((marker) => {
-        const page = pageRefs.current.get(marker.sheetLink.page)
-        if (!page) {
-          nextOffsets[marker.id] = 0
-          return
-        }
+    let attempts = 0
+    let timeoutId: number | null = null
+    const compute = () => {
+      const next: Record<number, SystemBand[]> = {}
+      let pending = false
+      pageRefs.current.forEach((page, pageNumber) => {
         const canvas = page.querySelector('canvas')
-        if (!canvas) {
-          nextOffsets[marker.id] = 0
+        if (!canvas || !canvas.width) {
+          pending = true
           return
         }
-        const rect = page.getBoundingClientRect()
-        if (!rect.height || !rect.width) {
-          nextOffsets[marker.id] = 0
-          return
-        }
-        const ctx = canvas.getContext('2d', { willReadFrequently: true })
-        if (!ctx) {
-          nextOffsets[marker.id] = 0
-          return
-        }
-        const scaleX = canvas.width / rect.width
-        const scaleY = canvas.height / rect.height
-        if (!Number.isFinite(scaleX) || !Number.isFinite(scaleY)) {
-          nextOffsets[marker.id] = 0
-          return
-        }
-        const baseY = resolveYWithinPagePx(marker.sheetLink, page)
-        let bestOffset = 0
-        let bestScore = -1
-        candidates.forEach((offset) => {
-          const cssY = Math.min(
-            Math.max(0, baseY + offset),
-            Math.max(0, rect.height - sampleHeight)
-          )
-          const cssX = Math.min(Math.max(0, sampleX), Math.max(0, rect.width - sampleWidth))
-          const sx = Math.round(cssX * scaleX)
-          const sy = Math.round(cssY * scaleY)
-          const sw = Math.max(1, Math.round(sampleWidth * scaleX))
-          const sh = Math.max(1, Math.round(sampleHeight * scaleY))
-          try {
-            const data = ctx.getImageData(sx, sy, sw, sh).data
-            let white = 0
-            for (let i = 0; i < data.length; i += 4) {
-              if (data[i] > 230 && data[i + 1] > 230 && data[i + 2] > 230) {
-                white += 1
-              }
-            }
-            const score = data.length ? white / (data.length / 4) : 0
-            if (score > bestScore) {
-              bestScore = score
-              bestOffset = offset
-            }
-          } catch (error) {
-            bestOffset = 0
-            bestScore = 0
-          }
-        })
-        nextOffsets[marker.id] = bestOffset
+        next[pageNumber] = detectSystems(canvas).bands
       })
-      if (!cancelled) {
-        setMarkerOffsets(nextOffsets)
+      if (cancelled) {
+        return
+      }
+      setSystemBands(next)
+      // Canvases paint after this effect; retry until they're ready.
+      if ((pending || Object.keys(next).length < numPages) && attempts < 20) {
+        attempts += 1
+        timeoutId = window.setTimeout(compute, 200)
       }
     }
-    rafId = window.requestAnimationFrame(computeOffsets)
+    timeoutId = window.setTimeout(compute, 100)
     return () => {
       cancelled = true
-      window.cancelAnimationFrame(rafId)
+      if (timeoutId !== null) {
+        window.clearTimeout(timeoutId)
+      }
     }
-  }, [effectiveScale, numPages, pageWidth, resolveYWithinPagePx, sheetMarkers])
+  }, [effectiveScale, numPages, pageWidth])
+
+  // Fire onSystemBandsReady once when bands are first available so callers can
+  // rebuild any derived state (e.g. loop marker positions) that needs system geometry.
+  useEffect(() => {
+    if (!systemBandsReadyFiredRef.current && Object.keys(systemBands).length > 0 && onSystemBandsReady) {
+      systemBandsReadyFiredRef.current = true
+      onSystemBandsReady()
+    }
+  }, [systemBands, onSystemBandsReady])
 
   useEffect(() => {
     const root = containerRef.current
@@ -459,10 +869,37 @@ const PDFViewer = forwardRef<PDFViewerHandle, PDFViewerProps>(function PDFViewer
     setZoom((current) => clamp(Math.round((current + ZOOM_STEP) * 100) / 100, MIN_ZOOM, MAX_ZOOM))
   }
 
+  // Lazy + cached: compute bands only for pages not already in the cache, and
+  // only when first asked (never on a normal load). Band ratios are scale-
+  // invariant, so the cache survives zoom; pages whose canvas wasn't painted yet
+  // are filled in on a later call (self-healing).
+  const getSystemBands = useCallback(() => {
+    const cache = systemBandsRef.current
+    pageRefs.current.forEach((page, pageNumber) => {
+      if (cache[pageNumber]) {
+        return
+      }
+      const canvas = page.querySelector('canvas')
+      if (canvas && canvas.width) {
+        cache[pageNumber] = detectSystems(canvas).bands
+      }
+    })
+    return cache
+  }, [])
+
   useImperativeHandle(
     ref,
-    () => ({ getSheetPosition, scrollToSheetPosition, zoomIn: handleZoomIn, zoomOut: handleZoomOut }),
-    [getSheetPosition, scrollToSheetPosition]
+    () => ({
+      getSheetPosition,
+      scrollToSheetPosition,
+      getSystemBands,
+      setSyncHighlight,
+      startPlayheadFollow,
+      stopPlayheadFollow,
+      zoomIn: handleZoomIn,
+      zoomOut: handleZoomOut,
+    }),
+    [getSheetPosition, scrollToSheetPosition, getSystemBands, setSyncHighlight, startPlayheadFollow, stopPlayheadFollow]
   )
 
   useEffect(() => {
@@ -470,10 +907,10 @@ const PDFViewer = forwardRef<PDFViewerHandle, PDFViewerProps>(function PDFViewer
   }, [onZoomStateChange, zoomOutDisabled, zoomInDisabled])
 
   return (
-    <section className="h-full w-full">
+    <section className="relative h-full w-full">
       <div
         ref={containerRef}
-        className="relative h-full w-full overflow-y-auto overflow-x-hidden touch-pan-y touch-pinch-zoom"
+        className="no-scrollbar relative h-full w-full overflow-y-auto overflow-x-hidden touch-pan-y touch-pinch-zoom"
       >
         {error ? (
           <div className="flex min-h-full items-center justify-center text-sm text-red-600">
@@ -481,7 +918,7 @@ const PDFViewer = forwardRef<PDFViewerHandle, PDFViewerProps>(function PDFViewer
           </div>
         ) : (
           <Document
-            file={PDF_URL}
+            file={pdfUrl}
             onLoadSuccess={handleDocumentLoadSuccess}
             onLoadError={handleDocumentLoadError}
             loading={
@@ -492,7 +929,8 @@ const PDFViewer = forwardRef<PDFViewerHandle, PDFViewerProps>(function PDFViewer
           >
             <div className="flex flex-col items-center">
               {pages.map((pageNumber) => {
-                const markersForPage = markersByPage.get(pageNumber) ?? []
+                const barsStartingHere = marginBars.filter((b) => b.startPage === pageNumber)
+                const syncAnchorsForPage = syncAnchorsByPage.get(pageNumber) ?? []
                 const pageNode = pageRefs.current.get(pageNumber) ?? null
                 return (
                   <div key={pageNumber} className="flex w-full justify-center">
@@ -500,10 +938,8 @@ const PDFViewer = forwardRef<PDFViewerHandle, PDFViewerProps>(function PDFViewer
                       ref={setPageRef(pageNumber)}
                       data-page-number={pageNumber}
                       className="relative"
+                      style={pageNumber > 1 ? { marginTop: '6px' } : undefined}
                     >
-                      {pageNumber > 1 && (
-                        <div className="pointer-events-none absolute inset-x-0 top-0 z-10 h-px bg-slate-300" />
-                      )}
                       <Page
                         pageNumber={pageNumber}
                         scale={effectiveScale}
@@ -512,37 +948,218 @@ const PDFViewer = forwardRef<PDFViewerHandle, PDFViewerProps>(function PDFViewer
                         renderAnnotationLayer={false}
                         onLoadSuccess={handlePageLoadSuccess}
                         onLoadError={handlePageLoadError}
+                        onRenderSuccess={() => handlePageRendered(pageNumber)}
                         onRenderError={handlePageRenderError}
                       />
-                      {markersForPage.map((marker) => {
-                        const markerOffset = markerOffsets[marker.id] ?? 0
-                        const baseY = resolveYWithinPagePx(marker.sheetLink, pageNode)
+                      {DEBUG_SYSTEMS &&
+                        (systemBands[pageNumber] ?? []).map((band, index) => {
+                          const pageHeight = pageNode ? getPageHeight(pageNode) : 0
+                          if (!pageHeight) {
+                            return null
+                          }
+                          return (
+                            <div key={`band-${index}`} className="pointer-events-none absolute inset-x-0 z-20">
+                              <div
+                                className="absolute inset-x-0 border-y-2 border-emerald-500 bg-emerald-400/15"
+                                style={{
+                                  top: band.topRatio * pageHeight,
+                                  height: (band.bottomRatio - band.topRatio) * pageHeight,
+                                }}
+                              />
+                              <div
+                                className="absolute inset-x-0 border-t-2 border-dashed border-rose-500"
+                                style={{ top: band.firstLineRatio * pageHeight }}
+                              />
+                            </div>
+                          )
+                        })}
+                      {import.meta.env.DEV && syncHighlight?.page === pageNumber && (() => {
+                        const pageHeight = pageNode ? getPageHeight(pageNode) : 0
+                        if (!pageHeight) return null
+                        const bands = systemBandsRef.current[pageNumber]
+                        const band = bands ? bandForY(bands, syncHighlight.yWithinPageRatio) : null
+                        const topRatio = band ? band.topRatio : Math.max(0, syncHighlight.yWithinPageRatio - 0.06)
+                        const botRatio = band ? band.bottomRatio : Math.min(1, syncHighlight.yWithinPageRatio + 0.06)
                         return (
-                          <button
-                            key={marker.id}
-                            className={`sheet-marker absolute left-2 z-10 flex max-w-[180px] items-center gap-1 rounded-full border px-2 py-1 text-[10px] font-semibold text-white transition sm:left-1 md:-left-4 md:max-w-[210px] md:gap-2 md:px-3 md:py-1.5 md:text-[11px] lg:-left-6 lg:max-w-[240px] lg:text-xs${marker.isDraft ? ' opacity-60 border-dashed' : ''}`}
-                            style={{
-                              top: Math.max(0, baseY + markerOffset),
-                              ['--marker-color' as string]: marker.color ?? '#94a3b8',
-                            }}
-                            type="button"
-                            onClick={(event) => {
-                              event.stopPropagation()
-                              onMarkerClick?.(marker.id)
-                            }}
-                          >
-                            <span className="flex items-center gap-0.5 text-white/90">
-                              <span className="h-2.5 w-[2px] rounded-full bg-white/80 md:h-3" />
-                              <AudioLines size={11} strokeWidth={3} className="text-white/90" />
-                              <span className="h-2.5 w-[2px] rounded-full bg-white/80 md:h-3" />
-                            </span>
-                            <span className="truncate pl-1">{marker.name}</span>
-                            {marker.isDraft && (
-                              <span className="ml-1 text-[9px] uppercase tracking-wide opacity-60">draft</span>
-                            )}
-                          </button>
+                          <div className="pointer-events-none absolute inset-x-0 z-30">
+                            <div
+                              className="absolute inset-x-0 bg-amber-400/25 border-y-2 border-amber-500"
+                              style={{ top: topRatio * pageHeight, height: (botRatio - topRatio) * pageHeight }}
+                            />
+                            <div
+                              className="absolute right-2 flex items-center gap-1.5 rounded-sm bg-amber-500 px-1.5 py-0.5 text-[10px] font-mono font-semibold text-white"
+                              style={{ top: topRatio * pageHeight + 2 }}
+                            >
+                              <span>{syncHighlight.text}</span>
+                              <span className="opacity-70">{syncHighlight.time.toFixed(2)}s</span>
+                              <span className="opacity-60">{Math.round(syncHighlight.confidence * 100)}%</span>
+                            </div>
+                          </div>
                         )
-                      })}
+                      })()}
+                      {syncAnchorsForPage.length > 0 && (() => {
+                        const pageHeight = pageNode ? getPageHeight(pageNode) : 0
+                        const pageW = pageNode ? pageNode.getBoundingClientRect().width : 0
+                        if (!pageHeight || !pageW) return null
+                        return (
+                          <div className="absolute inset-0 z-20">
+                            {syncAnchorsForPage.map((anchor, index) => {
+                              const x = (anchor.xWithinPageRatio ?? 0.5) * pageW
+                              const y = anchor.yWithinPageRatio * pageHeight
+                              const conf = anchor.confidence
+                              const color =
+                                conf >= 0.95 ? '#059669' : conf >= 0.85 ? '#d97706' : '#e11d48'
+                              const mismatch =
+                                anchor.heard &&
+                                anchor.heard.replace(/[^a-z]/gi, '').toLowerCase() !==
+                                  anchor.text.replace(/[^a-z]/gi, '').toLowerCase()
+                              return (
+                                <div
+                                  key={index}
+                                  className="group absolute -translate-y-1/2 leading-none"
+                                  style={{ left: x, top: y }}
+                                  title={`${anchor.time.toFixed(2)}s  heard "${anchor.heard ?? '?'}" → score "${anchor.text}"  (conf ${conf.toFixed(2)}, p${anchor.page})`}
+                                >
+                                  <div
+                                    className="h-1.5 w-1.5 rounded-full ring-1 ring-white"
+                                    style={{ backgroundColor: color }}
+                                  />
+                                  <div
+                                    className="pointer-events-none absolute left-2 top-1/2 flex -translate-y-1/2 items-center gap-0.5 whitespace-nowrap rounded-sm bg-white/85 px-0.5 font-mono text-[8px] font-semibold shadow-sm ring-1 group-hover:bg-white group-hover:text-[10px] group-hover:z-50"
+                                    style={{ color, ['--tw-ring-color' as string]: color }}
+                                  >
+                                    <span>{anchor.time.toFixed(1)}</span>
+                                    <span className={mismatch ? 'underline decoration-rose-500 decoration-wavy' : ''}>
+                                      {anchor.heard ?? '?'}
+                                    </span>
+                                  </div>
+                                </div>
+                              )
+                            })}
+                          </div>
+                        )
+                      })()}
+                      {(() => {
+                        const pageHeight = pageNode ? getPageHeight(pageNode) : 0
+                        if (!pageHeight) return null
+                        const barGeom = barsStartingHere.map((bar) => {
+                          const m = bar.marker
+                          const topPx = Math.max(0, bar.startRatio * pageHeight)
+                          const docTop = docYForPosition(m.sheetLink)
+                          const docEnd = m.sheetLinkEnd ? docYForPosition(m.sheetLinkEnd) : docTop
+                          const spanPx =
+                            docTop != null && docEnd != null
+                              ? docEnd - docTop
+                              : (bar.endRatio - bar.startRatio) * pageHeight
+                          const height = Math.max(PAGE_BAR_MIN_PX, spanPx)
+                          const right = PAGE_BAR_OFFSET + bar.subLane * (PAGE_BAR_W + PAGE_BAR_GAP)
+                          // Wrapper = the loop's true span (with a small floor so even a
+                          // min-height bar gives the chip enough range to engage one step).
+                          // This makes CSS sticky release the chip exactly as the loop's end
+                          // scrolls past the top — matching the span test in updateChipSlots.
+                          const wrapperH = Math.max(height, PAGE_CHIP_STICKY_TOP + CHIP_STACK_STEP)
+                          return { bar, m, topPx, height, wrapperH, right }
+                        })
+                        return (
+                          <>
+                            {/* Phase 1: Bars — clickable colored rectangles, lower z. */}
+                            {barGeom.map(({ bar, m, topPx, height, right }) => (
+                              <button
+                                key={`bar-${m.id}`}
+                                type="button"
+                                aria-label={m.name}
+                                className="absolute"
+                                style={{
+                                  top: topPx,
+                                  right: `calc(100% + ${right}px)`,
+                                  width: PAGE_BAR_W,
+                                  height,
+                                  zIndex: bar.z,
+                                  backgroundColor: m.color ?? '#94a3b8',
+                                  borderRadius: 3,
+                                  opacity: m.isDraft ? 0.6 : 1,
+                                  boxShadow: m.active
+                                    ? '0 0 0 2px rgba(255,255,255,0.95), 0 0 0 3.5px rgba(15,23,42,0.18)'
+                                    : undefined,
+                                  transition: 'box-shadow 80ms ease-out',
+                                }}
+                                onMouseEnter={(e) => {
+                                  const btn = e.currentTarget
+                                  btn.style.boxShadow = '0 0 0 1.5px rgba(255,255,255,0.7), 0 0 8px rgba(0,0,0,0.18)'
+                                }}
+                                onMouseLeave={(e) => {
+                                  const btn = e.currentTarget
+                                  btn.style.boxShadow = m.active
+                                    ? '0 0 0 2px rgba(255,255,255,0.95), 0 0 0 3.5px rgba(15,23,42,0.18)'
+                                    : 'none'
+                                }}
+                                onClick={(event) => {
+                                  event.stopPropagation()
+                                  onMarkerClick?.(m.id)
+                                }}
+                              />
+                            ))}
+                            {/* Phase 2: Chips — rendered separately (higher chipZ than all
+                                bars) so chips always paint above bars regardless of loop
+                                order. `position: sticky` + direct style.top updates via the
+                                scroll effect (no React state) give smooth stacking without
+                                re-renders. Wrapper is taller than the bar to give the sticky
+                                chip enough range to actually engage. */}
+                            {barGeom.map(({ bar, m, topPx, wrapperH, right }) => (
+                              <div
+                                key={`chip-${m.id}`}
+                                className="pointer-events-none absolute overflow-visible"
+                                style={{
+                                  top: topPx,
+                                  right: `calc(100% + ${right}px)`,
+                                  width: PAGE_BAR_W,
+                                  height: wrapperH,
+                                  zIndex: bar.chipZ,
+                                }}
+                              >
+                                <span
+                                  ref={(el) => {
+                                    if (el) chipRefsMapRef.current.set(m.id, el)
+                                    else chipRefsMapRef.current.delete(m.id)
+                                  }}
+                                  className="pointer-events-auto max-w-[160px] truncate whitespace-nowrap rounded-md px-1.5 py-0.5 text-[10px] font-semibold text-white"
+                                  style={{
+                                    position: 'sticky',
+                                    // First-paint fallbacks; updateChipSlots reconciles top
+                                    // (pinned slot) and transform (resting nudge) on mount + scroll.
+                                    top: PAGE_CHIP_STICKY_TOP,
+                                    transform: CHIP_BASE_TRANSFORM,
+                                    display: 'inline-block',
+                                    backgroundColor: m.color ?? '#94a3b8',
+                                    textShadow: '0 1px 2px rgba(0,0,0,0.3)',
+                                    boxShadow: m.active
+                                      ? '0 0 0 1.5px rgba(255,255,255,0.95), 0 1px 3px rgba(15,23,42,0.25)'
+                                      : '0 1px 3px rgba(15,23,42,0.18)',
+                                    cursor: 'pointer',
+                                    transition: 'top 120ms ease-out, transform 120ms ease-out, box-shadow 80ms ease-out',
+                                  }}
+                                  onMouseEnter={(e) => {
+                                    const span = e.currentTarget
+                                    span.style.boxShadow = '0 0 0 1.5px rgba(255,255,255,0.7), 0 0 8px rgba(0,0,0,0.18)'
+                                  }}
+                                  onMouseLeave={(e) => {
+                                    const span = e.currentTarget
+                                    span.style.boxShadow = m.active
+                                      ? '0 0 0 1.5px rgba(255,255,255,0.95), 0 1px 3px rgba(15,23,42,0.25)'
+                                      : '0 1px 3px rgba(15,23,42,0.18)'
+                                  }}
+                                  onClick={(event) => {
+                                    event.stopPropagation()
+                                    onMarkerClick?.(m.id)
+                                  }}
+                                >
+                                  {m.name}
+                                </span>
+                              </div>
+                            ))}
+                          </>
+                        )
+                      })()}
                     </div>
                   </div>
                 )
@@ -551,6 +1168,17 @@ const PDFViewer = forwardRef<PDFViewerHandle, PDFViewerProps>(function PDFViewer
           </Document>
         )}
       </div>
+      {!error && (
+        <EdgeScrubberRail
+          containerRef={containerRef}
+          markers={sheetMarkers ?? []}
+          getDocY={docYForPosition}
+          numPages={numPages}
+          effectiveScale={effectiveScale}
+          isTouch={isTouch}
+          onSelectLoop={(id) => onMarkerClick?.(id)}
+        />
+      )}
     </section>
   )
 })

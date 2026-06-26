@@ -27,3 +27,16 @@ export function saveJson<T>(key: string, value: T | null) {
     // Ignore storage failures (quota, privacy mode).
   }
 }
+
+/**
+ * Pluggable key-value persistence used by PlayerDock. The default is global
+ * localStorage (single-song behavior, unchanged). The multi-song library injects
+ * a per-song store that maps these keys onto a Song/Track record instead, so the
+ * same component persists per song without touching its internal state logic.
+ */
+export type PracticeStore = {
+  load: <T>(key: string) => T | null
+  save: <T>(key: string, value: T | null) => void
+}
+
+export const localStorageStore: PracticeStore = { load: loadJson, save: saveJson }
