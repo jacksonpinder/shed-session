@@ -45,8 +45,11 @@ export default function ContextBar({
 }: ContextBarProps) {
   const isMobile = useMediaQuery('(max-width: 1024px), (pointer: coarse)')
 
-  const zoomButtonClass =
-    'flex h-8 w-8 items-center justify-center rounded-full border border-transparent bg-[#e7e9ec] text-[#0b1220] shadow-sm transition hover:bg-slate-200 active:bg-slate-200/80 disabled:cursor-not-allowed disabled:opacity-40'
+  // Shared style for all buttons that float directly over the PDF with no
+  // containing background. Solid white + border ensures visibility on white
+  // PDF pages; shadow-md hover makes the state change unmistakable.
+  const floatingButtonClass =
+    'flex h-8 w-8 items-center justify-center rounded-full bg-white text-[#0b1220] shadow border border-slate-200 transition hover:bg-slate-50 hover:shadow-md hover:border-slate-300 active:bg-slate-100 disabled:cursor-not-allowed disabled:opacity-40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#4F7F7A]/40'
 
   return (
     <div className="pointer-events-none absolute inset-x-0 top-0 z-30 flex items-start justify-between px-3 pt-2">
@@ -58,12 +61,12 @@ export default function ContextBar({
             onClick={onBack}
             aria-label="Back to library"
             title="Back to library"
-            className="flex h-8 w-8 items-center justify-center rounded-full bg-white/70 text-[#0b1220]/70 shadow-sm backdrop-blur-md transition hover:bg-white/90 hover:text-[#0b1220]"
+            className={floatingButtonClass}
           >
             <ArrowLeft size={16} />
           </button>
         ) : (
-          <div className="flex h-8 items-center px-2 rounded-full bg-white/70 shadow-sm backdrop-blur-md">
+          <div className="flex h-8 items-center px-2 rounded-full bg-white shadow border border-slate-200">
             <img src="/shed session.png" alt="" className="h-full w-auto mix-blend-multiply" />
           </div>
         )}
@@ -75,7 +78,7 @@ export default function ContextBar({
         <div className="pointer-events-auto mr-[68px] flex items-center gap-2">
           <button
             type="button"
-            className={zoomButtonClass}
+            className={floatingButtonClass}
             onClick={() => pdfViewerRef.current?.zoomOut()}
             disabled={zoomOutDisabled}
             aria-label="Zoom out"
@@ -84,7 +87,7 @@ export default function ContextBar({
           </button>
           <button
             type="button"
-            className={zoomButtonClass}
+            className={floatingButtonClass}
             onClick={() => pdfViewerRef.current?.zoomIn()}
             disabled={zoomInDisabled}
             aria-label="Zoom in"

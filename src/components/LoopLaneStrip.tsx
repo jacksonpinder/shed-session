@@ -281,7 +281,7 @@ export default function LoopLaneStrip({
                       e.stopPropagation()
                       onDelete(loop.id)
                     }}
-                    className={`pointer-events-auto absolute right-0.5 top-0.5 z-10 flex h-3.5 w-3.5 items-center justify-center rounded text-white/80 transition hover:text-rose-300 ${
+                    className={`pointer-events-auto absolute right-0.5 top-0.5 z-10 flex h-3.5 w-3.5 items-center justify-center rounded text-white/80 transition hover:bg-black/20 hover:text-white ${
                       isActive
                         ? 'opacity-100'
                         : 'opacity-0 group-hover:opacity-100'

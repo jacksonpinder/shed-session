@@ -45,11 +45,29 @@ export default function TrackManager({ songId, songTitle, onChanged, onClose }: 
     onChanged()
   }
 
-  const handleDelete = async (t: Track) => {
-    if (!window.confirm(`Remove “${t.name}” from this song?`)) return
-    await deleteTrack(t.id)
-    await refresh()
+  const handleDelete = (t: Track) => {
+    // Optimistically remove from UI; defer the actual DB delete until the
+    // toast dismisses so the user can undo without re-uploading the file.
+    setTracks((prev) => prev.filter((tr) => tr.id !== t.id))
     onChanged()
+
+    let undone = false
+    const timer = window.setTimeout(() => {
+      if (!undone) void deleteTrack(t.id)
+    }, 5000)
+
+    toast(`Removed “${t.name}”`, {
+      duration: 5000,
+      action: {
+        label: 'Undo',
+        onClick: () => {
+          undone = true
+          window.clearTimeout(timer)
+          void refresh()
+          onChanged()
+        },
+      },
+    })
   }
 
   const handleAdd = async (files: File[]) => {
@@ -101,7 +119,7 @@ export default function TrackManager({ songId, songTitle, onChanged, onClose }: 
                     onKeyDown={(e) => {
                       if (e.key === 'Enter') (e.target as HTMLInputElement).blur()
                     }}
-                    className="min-w-0 flex-1 rounded-md border border-transparent bg-transparent px-2 py-1 text-[13px] text-slate-800 outline-none hover:border-slate-200 focus:border-[#4F7F7A] focus:bg-white focus:ring-2 focus:ring-[#4F7F7A]/20"
+                    className="min-w-0 flex-1 rounded-md border border-transparent bg-transparent px-2 py-1 text-[13px] text-slate-800 outline-none hover:border-slate-200 focus:border-[#4F7F7A] focus:bg-white focus:ring-2 focus:ring-[#4F7F7A]/30"
                   />
                   {canShorten && (
                     <button

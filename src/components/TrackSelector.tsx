@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type RefObject } from 'react'
-import { Check, Music2, Settings2 } from 'lucide-react'
+import { Check, ListMusic, Settings2 } from 'lucide-react'
 
 /** Minimal track shape the selector needs. */
 export type TrackOption = { id: string; name: string }
@@ -39,11 +39,12 @@ function TrackMenu({ tracks, activeTrackId, onSelect, onClose, onManageTracks, a
   }, [onClose, anchorRef])
 
   const positionClass = openDirection === 'up' ? 'bottom-full mb-2' : 'top-full mt-2'
+  const originClass = openDirection === 'up' ? 'origin-bottom-left' : 'origin-top-left'
 
   return (
     <div
       ref={menuRef}
-      className={`absolute left-0 ${positionClass} z-[200] max-h-72 w-52 overflow-y-auto rounded-xl border border-slate-200 bg-white py-1.5 shadow-xl`}
+      className={`absolute left-0 ${positionClass} ${originClass} z-[200] max-h-72 w-52 overflow-y-auto rounded-xl border border-slate-200 bg-white py-1.5 shadow-xl animate-[menu-in_150ms_ease-out]`}
     >
       {onManageTracks && (
         <>
@@ -108,8 +109,8 @@ export default function TrackSelector({
     setOpen(false)
   }
 
-  const pillButtonClass =
-    'flex h-8 shrink-0 items-center gap-1.5 rounded-full border border-[#4F7F7A]/55 bg-black/5 px-3 text-[11px] font-semibold uppercase tracking-[0.15em] text-[#0b1220] shadow-sm shadow-black/10 backdrop-blur-sm transition hover:bg-black/10 active:bg-black/15 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#4F7F7A]/40 focus-visible:ring-offset-2 focus-visible:ring-offset-white/80'
+  const controlButtonClass =
+    'flex h-8 w-8 shrink-0 items-center justify-center rounded-full border border-[#4F7F7A]/55 bg-black/5 text-[#0b1220] shadow-sm shadow-black/10 backdrop-blur-sm transition hover:bg-black/10 active:bg-black/15 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#4F7F7A]/40 focus-visible:ring-offset-2 focus-visible:ring-offset-white/80'
 
   return (
     <div className="relative shrink-0">
@@ -117,13 +118,12 @@ export default function TrackSelector({
         ref={buttonRef}
         type="button"
         onClick={() => setOpen((v) => !v)}
-        className={pillButtonClass}
+        className={controlButtonClass}
         aria-label="Select track"
         aria-expanded={open}
         title="Select track"
       >
-        <Music2 size={11} className="shrink-0 opacity-60" />
-        <span className="max-w-[100px] truncate">{activeTrack.name}</span>
+        <ListMusic size={15} />
       </button>
 
       {open && (

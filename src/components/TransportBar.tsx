@@ -12,7 +12,7 @@ import {
   ArrowDown,
   ArrowUp,
   AudioLines,
-  Navigation,
+  MapPin,
   Pause,
   Play,
   Repeat,
@@ -655,9 +655,9 @@ export default function TransportBar({
   const renderSeekIcon = (direction: 'back' | 'forward') => (
     <span className="relative flex h-6 w-6 items-center justify-center">
       {direction === 'back' ? (
-        <RotateCcw size={21} strokeWidth={1.4} />
+        <RotateCcw size={21} strokeWidth={1.2} />
       ) : (
-        <RotateCw size={21} strokeWidth={1.4} />
+        <RotateCw size={21} strokeWidth={1.2} />
       )}
       <span className="absolute text-[9px] font-semibold leading-none tracking-tight text-current">
         {SEEK_SECONDS}
@@ -1077,7 +1077,7 @@ export default function TransportBar({
                           : ''
                   }`}
                 >
-                  <Navigation size={15} />
+                  <MapPin size={15} />
                 </button>
                 {autoScrollSuspended && autoScrollAvailable && (
                   <div className="absolute bottom-12 left-1/2 z-[9999] w-44 -translate-x-1/2 rounded-xl border border-amber-200 bg-white px-3 py-2 text-center text-[11px] font-medium leading-snug text-amber-700 shadow-xl">

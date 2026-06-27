@@ -32,14 +32,14 @@ const SAMPLE_URL = '/sample.mp3'
 const NEW_LOOP_SECONDS = 30
 const REGION_TRANSPARENT_COLOR = 'rgba(17, 24, 39, 0.08)'
 const LOOP_COLORS = [
-  'rgba(79, 127, 122, 0.9)',  // Anchor Teal (ties to accent)
-  'rgba(90, 95, 143, 0.9)',  // Muted Indigo
-  'rgba(91, 109, 138, 0.9)', // Slate Blue
-  'rgba(108, 123, 104, 0.9)',// Mossy Green
-  'rgba(143, 112, 133, 0.9)',// Dusty Plum
-  'rgba(158, 122, 86, 0.9)', // Warm Umber
-  'rgba(120, 132, 146, 0.9)',// Cool Gray-Blue
-  'rgba(96, 110, 125, 0.9)', // Deep Steel
+  'rgb(143, 103, 95)',  // Dusty Rose
+  'rgb(90, 95, 143)',   // Muted Indigo
+  'rgb(91, 109, 138)',  // Slate Blue
+  'rgb(108, 123, 104)', // Mossy Green
+  'rgb(143, 112, 133)', // Dusty Plum
+  'rgb(158, 122, 86)',  // Warm Umber
+  'rgb(120, 132, 146)', // Cool Gray-Blue
+  'rgb(96, 110, 125)',  // Deep Steel
 ]
 
 const LOOPS_STORAGE_KEY = 'practice:loops'

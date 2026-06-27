@@ -81,70 +81,71 @@ export default function SongCard({
     'flex w-full items-center gap-2 rounded-lg px-3 py-1.5 text-left text-[13px] transition text-rose-600 hover:bg-rose-50 active:bg-rose-100'
 
   return (
-    <div
-      role="button"
-      tabIndex={0}
-      onClick={() => !renaming && onOpen()}
-      onKeyDown={(e) => {
-        if (!renaming && (e.key === 'Enter' || e.key === ' ')) {
-          e.preventDefault()
-          onOpen()
-        }
-      }}
-      className="group relative flex cursor-pointer flex-col gap-3 rounded-2xl border border-slate-200 bg-white p-4 text-left shadow-sm transition hover:border-[#4F7F7A]/40 hover:shadow-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#4F7F7A]/40"
-    >
-      <div className="flex aspect-[4/3] items-center justify-center overflow-hidden rounded-xl bg-gradient-to-br from-slate-100 to-slate-200 text-slate-400">
-        {thumb ? (
-          <img
-            src={thumb}
-            alt=""
-            loading="lazy"
-            decoding="async"
-            className="h-full w-full object-cover object-top"
-          />
-        ) : (
-          <FileMusic size={36} strokeWidth={1.5} />
-        )}
-      </div>
-      <div className="min-w-0">
-        {renaming ? (
-          <input
-            ref={inputRef}
-            value={draft}
-            onClick={(e) => e.stopPropagation()}
-            onChange={(e) => setDraft(e.target.value)}
-            onBlur={commitRename}
-            onKeyDown={(e) => {
-              e.stopPropagation()
-              if (e.key === 'Enter') commitRename()
-              if (e.key === 'Escape') setRenaming(false)
-            }}
-            className="w-full rounded-md border border-slate-300 px-2 py-1 text-sm font-semibold text-slate-900 outline-none focus:border-[#4F7F7A] focus:ring-2 focus:ring-[#4F7F7A]/30"
-          />
-        ) : (
-          <h3 className="truncate text-sm font-semibold text-slate-900">{song.title}</h3>
-        )}
-        <div className="mt-1 flex items-center gap-2 text-[11px] text-slate-500">
-          <span className="inline-flex items-center gap-1">
-            <Music2 size={11} />
-            {trackCount} {trackCount === 1 ? 'track' : 'tracks'}
-          </span>
-          {loopCount > 0 && (
-            <span className="inline-flex items-center gap-1">
-              <Repeat size={11} />
-              {loopCount}
-            </span>
-          )}
-          {synced && (
-            <span className="inline-flex items-center rounded-full bg-[#4F7F7A]/10 p-1 text-[#4F7F7A]">
-              <Navigation size={11} />
-            </span>
+    <div className="group relative">
+      <button
+        type="button"
+        onClick={() => !renaming && onOpen()}
+        onKeyDown={(e) => {
+          if (!renaming && (e.key === 'Enter' || e.key === ' ')) {
+            e.preventDefault()
+            onOpen()
+          }
+        }}
+        className="flex w-full cursor-pointer flex-col gap-3 rounded-2xl border border-slate-200 bg-white p-4 text-left shadow-sm transition hover:border-[#4F7F7A]/40 hover:shadow-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#4F7F7A]/40"
+      >
+        <div className="flex aspect-[4/3] items-center justify-center overflow-hidden rounded-xl bg-gradient-to-br from-slate-100 to-slate-200 text-slate-400">
+          {thumb ? (
+            <img
+              src={thumb}
+              alt=""
+              loading="lazy"
+              decoding="async"
+              className="h-full w-full object-cover object-top"
+            />
+          ) : (
+            <FileMusic size={36} strokeWidth={1.5} />
           )}
         </div>
-      </div>
+        <div className="min-w-0">
+          {renaming ? (
+            <input
+              ref={inputRef}
+              value={draft}
+              onClick={(e) => e.stopPropagation()}
+              onChange={(e) => setDraft(e.target.value)}
+              onBlur={commitRename}
+              onKeyDown={(e) => {
+                e.stopPropagation()
+                if (e.key === 'Enter') commitRename()
+                if (e.key === 'Escape') setRenaming(false)
+              }}
+              className="w-full rounded-md border border-slate-300 px-2 py-1 text-sm font-semibold text-slate-900 outline-none focus:border-[#4F7F7A] focus:ring-2 focus:ring-[#4F7F7A]/30"
+            />
+          ) : (
+            <h3 className="truncate text-sm font-semibold text-slate-900">{song.title}</h3>
+          )}
+          <div className="mt-1 flex items-center gap-2 text-[11px] text-slate-500">
+            <span className="inline-flex items-center gap-1">
+              <Music2 size={11} />
+              {trackCount} {trackCount === 1 ? 'track' : 'tracks'}
+            </span>
+            {loopCount > 0 && (
+              <span className="inline-flex items-center gap-1">
+                <Repeat size={11} />
+                {loopCount}
+              </span>
+            )}
+            {synced && (
+              <span className="inline-flex items-center rounded-full bg-[#4F7F7A]/10 p-1 text-[#4F7F7A]">
+                <Navigation size={11} />
+              </span>
+            )}
+          </div>
+        </div>
+      </button>
 
-      {/* Overflow menu */}
-      <div className="absolute right-2 top-2" ref={menuRef}>
+      {/* Overflow menu — sibling to the card button, not nested inside it */}
+      <div className="absolute right-2 top-2 z-10" ref={menuRef}>
         <button
           type="button"
           aria-label="Song actions"
@@ -164,20 +165,20 @@ export default function SongCard({
             onClick={(e) => e.stopPropagation()}
             className="absolute right-0 top-full z-[60] mt-1 w-44 rounded-xl border border-slate-200 bg-white py-1.5 shadow-xl"
           >
-            <button className={`${menuItem} text-slate-800`} onClick={() => runAction(() => setRenaming(true))}>
+            <button type="button" className={`${menuItem} text-slate-800`} onClick={() => runAction(() => setRenaming(true))}>
               <Pencil size={14} className="text-slate-400" /> Rename
             </button>
-            <button className={`${menuItem} text-slate-800`} onClick={() => runAction(onAddTrack)}>
+            <button type="button" className={`${menuItem} text-slate-800`} onClick={() => runAction(onAddTrack)}>
               <Plus size={14} className="text-slate-400" /> Add track
             </button>
-            <button className={`${menuItem} text-slate-800`} onClick={() => runAction(onManageTracks)}>
+            <button type="button" className={`${menuItem} text-slate-800`} onClick={() => runAction(onManageTracks)}>
               <ListMusic size={14} className="text-slate-400" /> Manage tracks
             </button>
-            <button className={`${menuItem} text-slate-800`} onClick={() => runAction(onDuplicate)}>
+            <button type="button" className={`${menuItem} text-slate-800`} onClick={() => runAction(onDuplicate)}>
               <Copy size={14} className="text-slate-400" /> Duplicate
             </button>
             <div className="my-1 border-t border-slate-100" />
-            <button className={menuItemDelete} onClick={() => runAction(onDelete)}>
+            <button type="button" className={menuItemDelete} onClick={() => runAction(onDelete)}>
               <Trash2 size={14} /> Delete
             </button>
           </div>
