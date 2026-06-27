@@ -81,6 +81,55 @@ The app is in a working state. Key features all landed and verified:
 
 ---
 
+## 2026-06-26 — Tier 1 & 2 polish: scroll passthrough, loop lane, rail chip, add-loop pill, dead-code
+
+**What was done:**
+- **Scrubber rail scroll passthrough** — Outer `EdgeScrubberRail` container set to `pointer-events: none`. Band divs + viewport window re-enable `pointer-events: auto` selectively. Removed unused `onTrackPointerDown` handler (click-to-scroll-to-rail-position was the only casualty).
+- **Reduce loop lane padding** — `LANE_BOTTOM_CLEARANCE` reduced 12 → 4 in `LoopLaneStrip.tsx`. The "Loops" pill it was guarding no longer exists.
+- **Rail hover chip fix** — Chip is now a `<button>` (was `<div pointer-events-none>`). Added `startHover`/`endHover` callbacks with an 80ms leave-delay so the cursor can travel from band to chip without flickering. Chip calls `onSelectLoop` on click.
+- **Add loop button redesign** — Changed from icon-only `h-8 w-8` circle to pill (`h-8 px-3 gap-1.5`). Text: "Add loop" / "Exit loop". Icon: `Plus` rotates 45° (via `transition-transform`) when a loop is active instead of swapping to `XIcon`. Removed `InfinityIcon` import.
+- **Dead-code cleanup in TransportBar** — Removed: `speedMenuOpen`/`balanceOpen`/`transposeOpen` state; three associated click-outside `useEffect` hooks; `speedButtonRef`/`headphonesRef`/`transposeButtonRef`/three `*PopoverRef` refs; `speedLabel` memoized value; unused `Headphones` + `useMemo` imports.
+
+**Decisions made:**
+- `Plus` rotate-45° → × pattern (not two separate icons with crossfade) — simpler, smooth, well-established UX pattern.
+- Rail click-to-scroll-to-position removed alongside pointer passthrough; bands + scrubber are the interactive targets, not the background.
+
+**What's next:**
+- C4 & B6 on hold pending loop lane redesign thinking
+- Batch C: audio button badges; audio controls label polish; hover-intent for the audio panel
+- Remaining loop lane: collapsed-lane-click guard, touch target enlargement
+
+**Handoff state:**
+✅ App loads and renders correctly. All changes are styling/dead-code only; no logic regressions.
+✅ Typecheck clean (no new errors vs pre-existing baseline).
+
+---
+
+## 2026-06-26 — Batch C: audio controls redesign
+
+**What was done:**
+- **AudioSlider label row below track** — Label row (`mt-1`) now renders after the slider track instead of above it (`mb-1.5`). Endpoint labels become `text-[10px] font-medium` (no uppercase, less weight — they're now anchors, not headers). Reset chip stays centered in same row.
+- **Panel section headers** — Each section now has a small-caps label (`text-[10px] uppercase tracking-widest`) paired with a large right-anchored value. Value is 17px / `text-[#0b1220]` when non-default, 14px / `text-slate-400` when at default. Transitions via `transition-[color,font-size] duration-150`. Transpose shows "Original" when at 0.
+- **Balance + Mono merged into one header row** — Mono toggle moved from its own sub-row into the Balance section header. Toggle resized (h-5 w-9 → h-4 w-7, thumb h-4→h-3). Balance value indicator (`← L` / `R →`) appears at 13px when non-default.
+- **Divider tightening** — Panel section dividers `my-3` → `my-2`.
+- **Audio button badges** — Teal pill badges render above the AudioLines button when panel is closed and any control is non-default. `fmtTransposeBadge()` produces text like `+♭3`, `-M2`, `+P5`. Badges conditionally rendered: speed / transpose / balance each independent.
+
+**Decisions made:**
+- Badge uses text-only interval notation (not ReactNode from `renderTransposeLabel`) — simpler, works in a tiny pill, avoids inline-flex SVG icon at 10px.
+- Muted value at default vs hidden — shows the value at lower visual weight rather than hiding it, so the user can confirm "I'm at 1.0x" without opening the panel.
+- `pointer-events-none` on badge row so it never intercepts clicks intended for the button.
+
+**What's next:**
+- Audio hover intent (panel doesn't close when mouse travels to it)
+- C4 / B6 (deferred pending loop lane redesign decision)
+- Loop lane: collapsed-lane-click guard, touch targets
+
+**Handoff state:**
+✅ App loads and renders correctly. All changes verified in browser — badges, label positions, section headers, Mono toggle all correct.
+✅ Typecheck clean (no new errors vs pre-existing baseline).
+
+---
+
 ## [Previous sessions — reconstructed from memory]
 
 ### 2026-06 (multi-session) — Score Sync pipeline (Phases 1–7)

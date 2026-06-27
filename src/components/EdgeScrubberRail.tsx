@@ -52,6 +52,7 @@ export default function EdgeScrubberRail({
     clientHeight: 0,
   })
   const [hoveredId, setHoveredId] = useState<string | null>(null)
+  const hoverLeaveTimerRef = useRef<number | null>(null)
   // Mobile ghost rail auto-hides ~1.5s after the last scroll.
   const [ghostVisible, setGhostVisible] = useState(false)
   const ghostTimerRef = useRef<number | null>(null)
@@ -106,6 +107,27 @@ export default function EdgeScrubberRail({
       if (ghostTimerRef.current) window.clearTimeout(ghostTimerRef.current)
     }
   }, [containerRef, measure, isTouch])
+
+  useEffect(() => {
+    return () => {
+      if (hoverLeaveTimerRef.current !== null) window.clearTimeout(hoverLeaveTimerRef.current)
+    }
+  }, [])
+
+  const startHover = useCallback((id: string) => {
+    if (hoverLeaveTimerRef.current !== null) {
+      window.clearTimeout(hoverLeaveTimerRef.current)
+      hoverLeaveTimerRef.current = null
+    }
+    setHoveredId(id)
+  }, [])
+
+  const endHover = useCallback((id: string) => {
+    hoverLeaveTimerRef.current = window.setTimeout(() => {
+      setHoveredId((current) => (current === id ? null : current))
+      hoverLeaveTimerRef.current = null
+    }, 80)
+  }, [])
 
   // Re-measure when the document reflows (zoom changes content height).
   useEffect(() => {
@@ -207,16 +229,6 @@ export default function EdgeScrubberRail({
     }
   }, [])
 
-  // Click the rail track (not a band/window) → center the viewport there.
-  const onTrackPointerDown = useCallback(
-    (e: ReactPointerEvent<HTMLDivElement>) => {
-      const rect = e.currentTarget.getBoundingClientRect()
-      const y = e.clientY - rect.top
-      setScrollTop((y / railH) * scrollHeight - clientHeight / 2)
-    },
-    [railH, scrollHeight, clientHeight, setScrollTop]
-  )
-
   if (!scrollable) return null
   const show = !isTouch || ghostVisible
 
@@ -226,10 +238,9 @@ export default function EdgeScrubberRail({
       style={{
         width: railW,
         opacity: show ? 1 : 0,
-        pointerEvents: show ? 'auto' : 'none',
+        pointerEvents: 'none',
         background: isTouch ? 'rgba(0,0,0,0.04)' : 'transparent',
       }}
-      onPointerDown={onTrackPointerDown}
     >
       {/* Stacked page cards (beside the band gutter) with a centered page number. */}
       {pageCards.map(({ page, top, height }) => {
@@ -268,9 +279,9 @@ export default function EdgeScrubberRail({
             className="absolute"
             // Above the scrubber so a band inside the viewport window stays
             // clickable/hoverable (matches the mockup's in-viewport hover).
-            style={{ top, left, width, height, zIndex: 20 }}
-            onPointerEnter={isTouch ? undefined : () => setHoveredId(marker.id)}
-            onPointerLeave={isTouch ? undefined : () => setHoveredId((id) => (id === marker.id ? null : id))}
+            style={{ top, left, width, height, zIndex: 20, pointerEvents: 'auto' }}
+            onPointerEnter={isTouch ? undefined : () => startHover(marker.id)}
+            onPointerLeave={isTouch ? undefined : () => endHover(marker.id)}
           >
             <button
               type="button"
@@ -293,12 +304,18 @@ export default function EdgeScrubberRail({
                     : undefined,
               }}
             />
-            {/* Chip — matches the page-margin / lane chips: shown on hover OR when
-                the loop is active, with the same selected ring; sits just left of
-                the band. */}
+            {/* Chip — shown on hover OR when active; clickable to select the loop.
+                Hover stays alive while the cursor moves from band → chip via the
+                startHover/endHover delay approach. */}
             {(isHovered || marker.active) && (
-              <div
-                className="pointer-events-none absolute max-w-[180px] truncate whitespace-nowrap rounded-md px-1.5 py-0.5 text-[10px] font-semibold text-white"
+              <button
+                type="button"
+                aria-label={marker.name}
+                onPointerEnter={isTouch ? undefined : () => startHover(marker.id)}
+                onPointerLeave={isTouch ? undefined : () => endHover(marker.id)}
+                onPointerDown={(e) => e.stopPropagation()}
+                onClick={(e) => { e.stopPropagation(); onSelectLoop(marker.id) }}
+                className="absolute max-w-[180px] truncate whitespace-nowrap rounded-md px-1.5 py-0.5 text-[10px] font-semibold text-white"
                 style={{
                   right: 'calc(100% + 6px)',
                   top: '50%',
@@ -308,6 +325,8 @@ export default function EdgeScrubberRail({
                   boxShadow: marker.active
                     ? '0 0 0 1.5px rgba(255,255,255,0.95), 0 1px 3px rgba(15,23,42,0.25)'
                     : '0 1px 3px rgba(15,23,42,0.2)',
+                  cursor: 'pointer',
+                  pointerEvents: 'auto',
                 }}
               >
                 {marker.name}
@@ -323,7 +342,7 @@ export default function EdgeScrubberRail({
                     borderLeft: `5px solid ${marker.color}`,
                   }}
                 />
-              </div>
+              </button>
             )}
           </div>
         )
@@ -338,6 +357,7 @@ export default function EdgeScrubberRail({
           height: Math.max(8, windowHeight - 4),
           left: isTouch ? 0 : bandGutterW + BAND_GUTTER_PAD,
           zIndex: 10,
+          pointerEvents: show ? 'auto' : 'none',
           boxSizing: 'border-box',
           background: isTouch ? 'rgba(0,0,0,0.18)' : 'rgba(79,127,122,0.14)',
           border: isTouch ? undefined : '1.5px solid #4F7F7A',

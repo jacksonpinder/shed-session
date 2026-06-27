@@ -40,7 +40,7 @@ const peekRowOpacity = (lane: number) =>
 const LANE_TOP_PAD = 4
 // Reserved strip at the lane bottom for the centered "Loops" pill, so the pill
 // never overlaps a loop. Loops draw above it; the strip stays click-to-collapse.
-const LANE_BOTTOM_CLEARANCE = 12
+const LANE_BOTTOM_CLEARANCE = 4
 // Matches `--waveform-edge-pad` in tailwind.css so lane bars line up with the
 // waveform peaks above them. The waveform fills its host edge-to-edge (no
 // internal scroll padding), so bars span the full width too.

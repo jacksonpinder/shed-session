@@ -21,7 +21,7 @@ _High-priority, well-defined, can be picked up next._
 
 ### Home Page / Library
 
-- **PDF indicator** — Replace "Synced" text badge with the Nav/Scroll icon. Remove the "Manual" badge entirely.
+- ~~**PDF indicator**~~ — ✅ Already done.
 - **Loop count on track card** — Show loop count next to track number using the loop icon (e.g. `🔁 3`).
 
 ### Add Song Modal
@@ -32,14 +32,14 @@ _High-priority, well-defined, can be picked up next._
 
 ### Icon & Button Styling
 
-- **Icon color consistency** — All button icons use the same color in on and off state. On/off communicated by button bg/border/hover only. Exception: Nav/auto-scroll amber glow stays as-is.
+- ~~**Icon color consistency**~~ — ✅ Already done.
 - **Trash icon + hover** — Replace trash icon with lucide `Trash2` (or `Delete` if available). Hover color: a shade of red that fits the design system.
-- **Add loop button redesign** — Change from icon-only circle to a pill button with text: "Add loop" (+ icon) when inactive, "Exit loop" (X icon) when active. Add smooth rotate animation on the icon (+ ↻ X). Button styling matches the other pill buttons in the transport bar.
+- ~~**Add loop button redesign**~~ — ✅ Done (2026-06-26): pill with text + Plus icon that rotates 45° to × on active.
 
 ### Audio Controls
 
-- **Audio button badges** — When a control is non-default, show a badge near the top of the AudioLines button. Speed badge on the left, transpose center, balance right. Examples: `1.15×`, `+♭3`, `L`.
-- **Audio controls menu polish** — Move 0.5/1.5, ↓P5/↑P5, and L/R labels down so there's minimal padding between them and the top of the thumb. Make the currently selected value more visually prominent.
+- ~~**Audio button badges**~~ — ✅ Done (2026-06-26): teal pill badges above the AudioLines button when any control is non-default. Hide when panel is open. Speed: `1.25x`; transpose: `+♭3`/`-M2`; balance: `L`/`R`.
+- ~~**Audio controls menu polish**~~ — ✅ Done (2026-06-26): labels moved below slider track; section headers now show large prominent value (17px active / 14px muted-default); Mono toggle moved into Balance header row; dividers tightened (my-3→my-2).
 - **Audio hover UI** — Improve hover/focus behavior so the popover doesn't close when the mouse moves across the gap to the panel. Use a hover-intent delay or pointer-bridge approach per standard best practices.
 
 ### Loop Lane & Rail
@@ -49,10 +49,10 @@ _High-priority, well-defined, can be picked up next._
 - **Scrubber z-index** — Scrubber rail overlays pages but sits beneath the loop bars to its left. Add padding on all four sides of the rail and scrubber track.
 - **Rail-to-page padding** — Ensure visible padding between the left rail bars and the adjacent page/scrubber area (or the edge of the screen at narrow widths).
 - **Touch target enlargement** — Enlarge tap/click areas for small elements: loop bars in the margin rail, collapse/expand bump, etc.
-- **Scrubber rail scroll passthrough** — Allow page scrolling when the cursor is over the rail (set `pointer-events: auto` only on interactive elements, `none` on the rail background).
+- ~~**Scrubber rail scroll passthrough**~~ — ✅ Done (2026-06-26): outer rail `pointer-events: none`; bands + viewport window re-enabled selectively.
 - **Scrubber viewport width** — The viewport window (teal rectangle) should match the full page width, not wider or narrower.
-- **Rail hover chip interaction** — When hovering over a loop band by the rail, the chip that pops up should be clickable. Add a `pointer-events` bridge or `passthrough` area between the band and the chip so the cursor doesn't lose hover.
-- **Reduce loop lane padding** — Reduce the bottom padding beneath loop lane chips when both expanded and collapsed (adjust `LANE_BOTTOM_CLEARANCE`).
+- ~~**Rail hover chip interaction**~~ — ✅ Done (2026-06-26): chip is now a button; hover uses 80ms leave-delay so cursor can travel band → chip without flicker.
+- ~~**Reduce loop lane padding**~~ — ✅ Done (2026-06-26): `LANE_BOTTOM_CLEARANCE` reduced from 12 → 4.
 
 ### Navigation / Auto-scroll
 
@@ -61,11 +61,11 @@ _High-priority, well-defined, can be picked up next._
 
 ### UI / Interaction (existing)
 
-- **C4** — Remove LoopDetail card. Replace with inline name editing + delete on the loop button. Delete = trash icon → immediate delete + 5s "Undo" toast (no pre-confirm). Drop per-loop repeat/scroll/time/length/location UI.
+- **C4** — Remove LoopDetail card. Replace with inline name editing + delete on the loop button. Delete = trash icon → immediate delete + undo toast (already implemented). Drop per-loop repeat/scroll/time/length/location UI. _Waiting on loop lane redesign decision._
 - **B6** — After C4: remove legacy `sheetLinkDraft` / `isDraft` / `"Link this loop"` toast. `sheetLink` itself is load-bearing; only the draft trio goes. Also remove `LoopDetail.tsx`.
 - **B2** — Match play-progress bar height to the collapsed waveform height. Defer until D-group pill sizing is final.
 - **D3 mobile** — Audio settings bottom drawer (speed, transpose, balance, mono) opening from the `AudioLines` button on touch devices. Desktop popover stays. `AudioSlider` already reusable.
-- **Dead-code cleanup** — Remove from `TransportBar`/`PlayerDock`: `speedMenuOpen`, `transposeOpen`, `balanceOpen` state; `speedButtonRef`, `transposeButtonRef`, `headphonesRef`, `*PopoverRef`; `speedLabel`; associated click-outside effects.
+- ~~**Dead-code cleanup**~~ — ✅ Done (2026-06-26): removed from `TransportBar`: `speedMenuOpen`/`balanceOpen`/`transposeOpen` state + their click-outside effects; dead button refs; `speedLabel`; unused `Headphones`/`useMemo` imports.
 
 ### Content
 

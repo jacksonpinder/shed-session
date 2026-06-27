@@ -1,7 +1,6 @@
 import {
   useCallback,
   useEffect,
-  useMemo,
   useRef,
   useState,
   forwardRef,
@@ -13,7 +12,6 @@ import {
   ArrowDown,
   ArrowUp,
   AudioLines,
-  Headphones,
   Navigation,
   Pause,
   Play,
@@ -98,6 +96,12 @@ const renderTransposeLabel = (semitones: number): ReactNode => {
 // Always keep at least one decimal (1.0x, 1.5x, 0.95x) — never a bare "1x".
 const formatSpeedLabel = (rate: number) => `${rate.toFixed(2).replace(/0$/, '')}x`
 const formatSeekLabel = (delta: number) => `${delta > 0 ? '+' : ''}${delta}`
+const fmtTransposeBadge = (semitones: number) => {
+  const part = TRANSPOSE_INTERVALS[Math.abs(semitones)]
+  if (!part) return `${semitones > 0 ? '+' : ''}${semitones}`
+  const q = part.quality === 'flat' ? '♭' : part.quality
+  return `${semitones > 0 ? '+' : '-'}${q}${part.degree}`
+}
 const getHoldDelayMs = (pointerType: string) =>
   pointerType === 'mouse' ? SEEK_HOLD_DELAY_MS_MOUSE : SEEK_HOLD_DELAY_MS_TOUCH
 const getHoldSlopPx = (pointerType: string) =>
@@ -211,7 +215,6 @@ export default function TransportBar({
   onSelectTrack,
   onManageTracks,
 }: TransportBarProps) {
-  const speedButtonRef = useRef<HTMLButtonElement | null>(null)
   const backButtonRef = useRef<HTMLButtonElement | null>(null)
   const forwardButtonRef = useRef<HTMLButtonElement | null>(null)
   const backHoldRootRef = useRef<HTMLDivElement | null>(null)
@@ -232,7 +235,6 @@ export default function TransportBar({
   const backToastTimeoutRef = useRef<number | null>(null)
   const forwardToastTimeoutRef = useRef<number | null>(null)
   const [expandedScale, setExpandedScale] = useState(1)
-  const [speedMenuOpen, setSpeedMenuOpen] = useState(false)
   const [seekHoldOpen, setSeekHoldOpen] = useState<SeekHoldDirection | null>(null)
   const [seekHoldHoverIndex, setSeekHoldHoverIndex] = useState<number | null>(null)
   const seekHoldOpenRef = useRef<SeekHoldDirection | null>(null)
@@ -242,13 +244,6 @@ export default function TransportBar({
   const [forwardToastLabel, setForwardToastLabel] = useState(formatSeekLabel(SEEK_SECONDS))
   const [backToastOffset, setBackToastOffset] = useState(20)
   const [forwardToastOffset, setForwardToastOffset] = useState(20)
-  const speedPopoverRef = useRef<HTMLDivElement | null>(null)
-  const [balanceOpen, setBalanceOpen] = useState(false)
-  const headphonesRef = useRef<HTMLButtonElement | null>(null)
-  const balancePopoverRef = useRef<HTMLDivElement | null>(null)
-  const [transposeOpen, setTransposeOpen] = useState(false)
-  const transposeButtonRef = useRef<HTMLButtonElement | null>(null)
-  const transposePopoverRef = useRef<HTMLDivElement | null>(null)
   // D3: the combined audio-lines cluster. Opens on click/tap; on desktop (fine
   // pointer) it also reveals on hover. `audioCluster` is the open-or-hovered union.
   const [audioOpen, setAudioOpen] = useState(false)
@@ -268,6 +263,9 @@ export default function TransportBar({
   }, [])
   const audioPanelOpen = audioOpen || (isFinePointer && audioHover)
   const audioActive = playbackRate !== 1 || transpose !== 0 || Math.abs(balance) > 0.005
+  const speedBadge = playbackRate !== 1 ? formatSpeedLabel(playbackRate) : null
+  const transposeBadge = transpose !== 0 ? fmtTransposeBadge(transpose) : null
+  const balanceBadge = Math.abs(balance) > 0.05 ? (balance < 0 ? 'L' : 'R') : null
   useEffect(() => {
     if (!audioOpen) return
     const handler = (e: MouseEvent) => {
@@ -293,60 +291,6 @@ export default function TransportBar({
     },
     [onSeekExtensionChange]
   )
-
-  useEffect(() => {
-    if (!speedMenuOpen) {
-      return
-    }
-    const handlePointerDown = (event: PointerEvent) => {
-      const target = event.target as Node | null
-      if (
-        speedButtonRef.current?.contains(target) ||
-        speedPopoverRef.current?.contains(target)
-      ) {
-        return
-      }
-      setSpeedMenuOpen(false)
-    }
-    document.addEventListener('pointerdown', handlePointerDown)
-    return () => document.removeEventListener('pointerdown', handlePointerDown)
-  }, [speedMenuOpen])
-
-  useEffect(() => {
-    if (!balanceOpen) {
-      return
-    }
-    const handlePointerDown = (event: PointerEvent) => {
-      const target = event.target as Node | null
-      if (
-        headphonesRef.current?.contains(target) ||
-        balancePopoverRef.current?.contains(target)
-      ) {
-        return
-      }
-      setBalanceOpen(false)
-    }
-    document.addEventListener('pointerdown', handlePointerDown)
-    return () => document.removeEventListener('pointerdown', handlePointerDown)
-  }, [balanceOpen])
-
-  useEffect(() => {
-    if (!transposeOpen) {
-      return
-    }
-    const handlePointerDown = (event: PointerEvent) => {
-      const target = event.target as Node | null
-      if (
-        transposeButtonRef.current?.contains(target) ||
-        transposePopoverRef.current?.contains(target)
-      ) {
-        return
-      }
-      setTransposeOpen(false)
-    }
-    document.addEventListener('pointerdown', handlePointerDown)
-    return () => document.removeEventListener('pointerdown', handlePointerDown)
-  }, [transposeOpen])
 
   useEffect(() => {
     if (!seekHoldOpen) {
@@ -379,8 +323,6 @@ export default function TransportBar({
       }
     }
   }, [])
-
-  const speedLabel = useMemo(() => formatSpeedLabel(playbackRate), [playbackRate])
 
   const getSeekToastOffset = useCallback((button: HTMLButtonElement | null) => {
     if (!button) {
@@ -854,9 +796,9 @@ export default function TransportBar({
         }`}
       >
         <div style={audioRowStyle(0)}>
-          <div className="mb-1 flex items-center justify-between">
-            <span className="text-[12px] font-medium text-slate-600">Speed</span>
-            <span className="text-[12px] font-semibold text-slate-800">{formatSpeedLabel(playbackRate)}</span>
+          <div className="mb-2 flex min-h-[22px] items-center justify-between">
+            <span className="text-[10px] font-medium uppercase tracking-widest text-slate-400">Speed</span>
+            <span className={`font-medium leading-none tabular-nums transition-[color,font-size] duration-150 ${playbackRate !== 1 ? 'text-[17px] tracking-tight text-[#0b1220]' : 'text-[14px] text-slate-400'}`}>{formatSpeedLabel(playbackRate)}</span>
           </div>
           <AudioSlider
             value={playbackRate}
@@ -879,11 +821,11 @@ export default function TransportBar({
             }
           />
         </div>
-        <div className="my-3 border-t border-slate-100" />
+        <div className="my-2 border-t border-slate-100" />
         <div style={audioRowStyle(1)}>
-          <div className="mb-1 flex items-center justify-between">
-            <span className="text-[12px] font-medium text-slate-600">Transpose</span>
-            <span className="text-[12px] font-semibold text-slate-800">
+          <div className="mb-2 flex min-h-[22px] items-center justify-between">
+            <span className="text-[10px] font-medium uppercase tracking-widest text-slate-400">Transpose</span>
+            <span className={`font-medium leading-none transition-[color,font-size] duration-150 ${transpose !== 0 ? 'text-[17px] tracking-tight text-[#0b1220]' : 'text-[14px] text-slate-400'}`}>
               {transpose === 0 ? 'Original' : renderTransposeLabel(transpose)}
             </span>
           </div>
@@ -912,31 +854,38 @@ export default function TransportBar({
             }
           />
         </div>
-        <div className="my-3 border-t border-slate-100" />
+        <div className="my-2 border-t border-slate-100" />
         <div style={audioRowStyle(2)}>
-          <div className="mb-1 flex items-center justify-between">
-            <span className="text-[12px] font-medium text-slate-600">Balance</span>
-            {isStereoSource && (
-              <label className="flex items-center gap-1.5 text-[12px] text-slate-600">
-                Mono
-                <button
-                  type="button"
-                  role="switch"
-                  aria-checked={mono}
-                  aria-label="Mono"
-                  onClick={() => setMono(!mono)}
-                  className={`relative inline-flex h-5 w-9 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#4F7F7A]/40 ${
-                    mono ? 'bg-[#4F7F7A]' : 'bg-slate-200'
-                  }`}
-                >
-                  <span
-                    className={`pointer-events-none inline-block h-4 w-4 rounded-full bg-white shadow-sm transition-transform ${
-                      mono ? 'translate-x-4' : 'translate-x-0'
+          <div className="mb-2 flex min-h-[22px] items-center justify-between">
+            <span className="text-[10px] font-medium uppercase tracking-widest text-slate-400">Balance</span>
+            <div className="flex items-center gap-2">
+              {Math.abs(balance) > 0.05 && (
+                <span className="text-[13px] font-medium leading-none text-[#0b1220]">
+                  {balance < 0 ? '← L' : 'R →'}
+                </span>
+              )}
+              {isStereoSource && (
+                <label className="flex items-center gap-1.5">
+                  <span className="text-[10px] font-medium uppercase tracking-widest text-slate-400">Mono</span>
+                  <button
+                    type="button"
+                    role="switch"
+                    aria-checked={mono}
+                    aria-label="Mono"
+                    onClick={() => setMono(!mono)}
+                    className={`relative inline-flex h-4 w-7 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#4F7F7A]/40 ${
+                      mono ? 'bg-[#4F7F7A]' : 'bg-slate-200'
                     }`}
-                  />
-                </button>
-              </label>
-            )}
+                  >
+                    <span
+                      className={`pointer-events-none inline-block h-3 w-3 rounded-full bg-white shadow-sm transition-transform ${
+                        mono ? 'translate-x-3' : 'translate-x-0'
+                      }`}
+                    />
+                  </button>
+                </label>
+              )}
+            </div>
           </div>
           <AudioSlider
             value={balance}
@@ -957,6 +906,31 @@ export default function TransportBar({
               ) : null
             }
           />
+        </div>
+      </div>
+      <div
+        className={`pointer-events-none absolute left-1/2 top-full -translate-x-1/2 overflow-hidden transition-[max-height,opacity] duration-150 ease-out ${
+          !audioPanelOpen && (speedBadge || transposeBadge || balanceBadge)
+            ? 'max-h-[22px] opacity-100'
+            : 'max-h-0 opacity-0'
+        }`}
+      >
+        <div className="flex gap-1 pt-1">
+          {speedBadge && (
+            <span className="whitespace-nowrap rounded-full border border-[#4F7F7A]/30 bg-[#4F7F7A]/10 px-1.5 py-px text-[10px] font-medium tabular-nums text-[#0b1220]">
+              {speedBadge}
+            </span>
+          )}
+          {transposeBadge && (
+            <span className="whitespace-nowrap rounded-full border border-[#4F7F7A]/30 bg-[#4F7F7A]/10 px-1.5 py-px text-[10px] font-medium text-[#0b1220]">
+              {transposeBadge}
+            </span>
+          )}
+          {balanceBadge && (
+            <span className="whitespace-nowrap rounded-full border border-[#4F7F7A]/30 bg-[#4F7F7A]/10 px-1.5 py-px text-[10px] font-medium text-[#0b1220]">
+              {balanceBadge}
+            </span>
+          )}
         </div>
       </div>
       <button

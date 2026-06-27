@@ -8,7 +8,7 @@ import {
   type MutableRefObject,
   type PointerEventHandler,
 } from 'react'
-import { ChevronDown, ChevronUp, Infinity as InfinityIcon, X as XIcon } from 'lucide-react'
+import { ChevronDown, ChevronUp, Plus } from 'lucide-react'
 import WaveSurfer from 'wavesurfer.js'
 import RegionsPlugin from 'wavesurfer.js/dist/plugins/regions.esm.js'
 import RecordPlugin from 'wavesurfer.js/dist/plugins/record.esm.js'
@@ -3421,15 +3421,20 @@ export default function PlayerDock(props: PlayerDockProps) {
                     onClick={activeRegionId ? exitLoop : () => createLoopRef?.current?.()}
                     aria-label={activeRegionId ? 'Exit loop' : 'Add loop'}
                     title={activeRegionId ? 'Exit loop' : 'Add loop'}
-                    className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-full border border-[#4F7F7A]/55 bg-black/5 text-[#0b1220] shadow-sm shadow-black/10 backdrop-blur-sm transition hover:bg-black/10 active:bg-black/15 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#4F7F7A]/40 focus-visible:ring-offset-2 focus-visible:ring-offset-white/80 ${
+                    className={`flex h-8 shrink-0 items-center gap-1.5 rounded-full border border-[#4F7F7A]/55 bg-black/5 px-3 text-[#0b1220] shadow-sm shadow-black/10 backdrop-blur-sm transition hover:bg-black/10 active:bg-black/15 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#4F7F7A]/40 focus-visible:ring-offset-2 focus-visible:ring-offset-white/80 ${
                       activeRegionId
                         ? '!border-[#4F7F7A] !bg-[#4F7F7A]/25 hover:!bg-[#4F7F7A]/30 active:!bg-[#4F7F7A]/35'
                         : ''
                     }`}
                   >
-                    {activeRegionId
-                      ? <XIcon size={15} strokeWidth={2.5} />
-                      : <InfinityIcon size={16} strokeWidth={2.5} />}
+                    <Plus
+                      size={14}
+                      strokeWidth={2.5}
+                      className={`shrink-0 transition-transform duration-200 ${activeRegionId ? 'rotate-45' : 'rotate-0'}`}
+                    />
+                    <span className="text-[12px] font-medium leading-none">
+                      {activeRegionId ? 'Exit loop' : 'Add loop'}
+                    </span>
                   </button>
                 </div>
               )}

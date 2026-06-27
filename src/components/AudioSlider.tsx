@@ -164,19 +164,6 @@ export function AudioSlider({
 
   return (
     <div className="select-none">
-      {(leftLabel || rightLabel || centerSlot) && (
-        <div className="mb-1.5 flex items-center justify-between gap-2">
-          <span className="text-[11px] font-semibold uppercase tracking-wide text-slate-400">
-            {leftLabel}
-          </span>
-          <span className="flex min-h-[20px] items-center">
-            {centerSlot?.(display, dragging)}
-          </span>
-          <span className="text-[11px] font-semibold uppercase tracking-wide text-slate-400">
-            {rightLabel}
-          </span>
-        </div>
-      )}
       <div
         ref={trackRef}
         role="slider"
@@ -220,6 +207,19 @@ export function AudioSlider({
           }}
         />
       </div>
+      {(leftLabel || rightLabel || centerSlot) && (
+        <div className="mt-0 flex items-center justify-between gap-2">
+          <span className="text-[10px] font-medium text-slate-400">
+            {leftLabel}
+          </span>
+          <span className="flex min-h-[18px] items-center">
+            {centerSlot?.(display, dragging)}
+          </span>
+          <span className="text-[10px] font-medium text-slate-400">
+            {rightLabel}
+          </span>
+        </div>
+      )}
     </div>
   )
 }

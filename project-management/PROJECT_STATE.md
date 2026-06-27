@@ -64,7 +64,7 @@ Expanded: color-coded rows of loop chips with a connector bracket from the activ
 
 ## Active Work
 
-_Batch B styling iteration (loop buttons, rail padding) complete. No active work — see BACKLOG.md for what's next._
+_Tier 1 & 2 polish complete (2026-06-26). No active work — see BACKLOG.md for what's next._
 
 ---
 
