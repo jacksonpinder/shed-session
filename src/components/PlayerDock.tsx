@@ -1797,14 +1797,22 @@ export default function PlayerDock(props: PlayerDockProps) {
         return
       }
       cancelLoopFades()
-      // Scrub/click on the waveform fires `interaction` once with the final time →
-      // jump the score to that spot (gated by the jump-on-event toggle).
-      scrollScoreToSongTime(trackToSongTime(time))
       if (dragSeekRef.current) {
         skipFadeUntilTimeRef.current = time
       }
       syncTakePlayback(time, true)
       scheduleLoopTimers()
+    })
+    // WaveSurfer emits 'interaction' on every drag mousemove, so we can't use it
+    // for score-jump (would look like continuous auto-scroll). Instead use 'click'
+    // (one-shot click seek) and 'dragend' (scrub release) — each fires exactly once.
+    waveSurfer.on('click', (relativeX: number) => {
+      if (destroyed || waveSurferRef.current !== waveSurfer) return
+      scrollScoreToSongTime(trackToSongTime(relativeX * waveSurfer.getDuration()))
+    })
+    waveSurfer.on('dragend', (relativeX: number) => {
+      if (destroyed || waveSurferRef.current !== waveSurfer) return
+      scrollScoreToSongTime(trackToSongTime(relativeX * waveSurfer.getDuration()))
     })
 
     waveSurfer.on('region-clicked', (region: any, event: MouseEvent) => {
