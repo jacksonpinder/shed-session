@@ -27,13 +27,11 @@ The `/project-management/` folder is the source of truth for current state, prio
 
 ```bash
 npm run dev
-npm run build
+npm run build      # vite build (no tsc; Netlify-ready)
+npm run typecheck  # tsc strict check (doesn't block build)
 npm run preview
-npm test          # node --experimental-strip-types; tests in tests/*.test.ts (Node 22+)
+npm test           # node --experimental-strip-types; tests in tests/*.test.ts (Node 22+)
 ```
-
-> `npm run build` is broken (pre-existing: tsconfig missing `jsx`). Typecheck with:
-> `npx tsc -p tsconfig.json --jsx react-jsx`
 
 ---
 
@@ -57,101 +55,15 @@ The core loop: the user uploads a PDF of their sheet music and one or more MP3s 
 
 ## Architecture
 
-### App shell
+Full system documentation lives in [`docs/architecture/`](docs/architecture/):
 
-`App.tsx` is a hash router (`#/` = library, `#/song/:id` = song view). `Library.tsx` lists songs. `SongView.tsx` loads the song from IndexedDB, injects a per-song `PracticeStore` into `PlayerDock`, and renders `PDFViewer` + `PlayerDock` side by side. `AnalysisProvider` (above the router in `analysisManager.tsx`) owns the Whisper/sync pipeline and notifies open song views when anchors arrive.
-
-### Data flow
-
-`SongView` is the shared-state layer for the active song. `PlayerDock` pushes loop marker data **up** via `onLoopMarkersChange`; `SongView` passes it **down** to `PDFViewer` as `loopMarkers`. The PDF imperative handle (`pdfViewerRef`) lets `PlayerDock` call `scrollToSheetPosition()`, `getSystemBands()`, `startPlayheadFollow()` / `stopPlayheadFollow()` directly without re-rendering through the parent.
-
-### Audio engine (`PlayerDock.tsx`)
-
-The heaviest file. WaveSurfer is set up with two plugins (`RegionsPlugin` for loops, `RecordPlugin` for mic input). Audio chain:
-
-```
-MediaElementSource → [SoundTouchNode (±7 semitones, bypassed at 0)]
-  → masterGain → monoGain → stereoPanner → destination
-                                    takeGain ──────────────→ destination (mic takes)
-```
-
-Key subsystems:
-
-- **Loop playback**: Each loop has `extendedStart`/`extendedEnd` bounds with a half-second pad. `audioprocess` + `timeupdate` events watch for the playback position crossing the end boundary and trigger a seek back to `extendedStart`. A drift guard prevents double-fires (80 ms threshold, 150 ms cooldown).
-- **Fade envelope**: `useGainEnvelope` (Web Audio linear ramps) handles fade-out at loop end and fade-in at loop start to avoid clicks. `useVolumeEnvelope` (rAF + ease-in-out) handles WaveSurfer's software volume separately.
-- **Lead-in offset**: `songToTrackTime`/`trackToSongTime` conversions applied at three seams — loop↔region sync, writeback on drag/new-loop, and time→anchor resolution.
-- **Balance / mono**: `masterGain → monoGain → stereoPanner → destination`. `setBalance(-1…+1)` ramps `stereoPannerRef.pan` (`setTargetAtTime`, 15 ms). `setMono(bool)` flips `monoGainRef` channel mode. Mono toggle is hidden for mono sources (detected via `OfflineAudioContext` decode, not WaveSurfer which downmixes).
-- **Transpose**: `@soundtouchjs/audio-worklet` (`SoundTouchNode`) provides ±7 semitones, inserted upstream of `masterGain`. Lazy init on first non-zero transpose. `applyTransposeRouting()` must run on every WaveSurfer re-init (the `MediaElementSourceNode` is recreated each time). Uses Lanczos interpolation + `quickSeek: false`.
-- **Persistence**: Per-song via `PracticeStore` injection (maps `practice:*` keys → Song/Track fields in IndexedDB). Blobs in IndexedDB.
-
-### PDF viewer (`PDFViewer.tsx`)
-
-`react-pdf`, all pages in a vertical scroll container. `ResizeObserver` → `fitWidthScale` (desktop default 1.4×). `IntersectionObserver` per page tracks visible page.
-
-Imperative handle:
-- `getSheetPosition()` — current scroll as `{page, yWithinPageRatio}`
-- `scrollToSheetPosition(pos)` — pixel-accurate scroll to a stored position
-- `getSystemBands()` — lazy, cached; returns system bands per page (scale-invariant ratios)
-- `startPlayheadFollow(getAnchor)` — starts the rAF auto-scroll loop
-- `stopPlayheadFollow()` — stops it
-
-**Margin loop bars**: 6px vertical bars just outside the PDF's right edge. Each bar spans the full docY of its loop (continuous across page breaks). Chip at bar top is `position:sticky`. Overlapping bars packed into sub-lanes via `packIntervals`.
-
-**Edge scrubber rail** (`EdgeScrubberRail.tsx`, 60px): white page cards with loop bands in a left gutter; draggable teal viewport window.
-
-### Transport (`TransportBar.tsx`)
-
-Purely presentational. Three-zone grid (`1fr auto 1fr`):
-- **Left**: Add loop / Exit loop button (Infinity / X icon)
-- **Center**: scaling pill — Repeat / Back / Play / Forward / Nav
-- **Right**: AudioLines button → stacked panel with Speed / Transpose / Balance+Mono (`AudioSlider`)
-
-All state and logic live in `PlayerDock`; everything is passed down as props.
-
-`AudioSlider` is a shared slider with center-out fill, magnetic center detent, optional `live` flag, and a `centerSlot` render-prop. Transpose is `live={false}` (commits on pointer-up only).
-
-### Loop lane (`LoopLaneStrip.tsx`)
-
-**Expanded**: color-coded rows of loop chips. The active region connects to the active chip via a colored connector bracket (left + right + bottom borders), running behind intervening chips (`zIndex:0`; active chip `zIndex:2`).
-
-**Collapsed** ("LG peek"): blurred whisper of micro-rows (3–5px tall, fading opacity, `blur(2px)`). Tap anywhere on the peek to expand. A full-width bumper (invisible at rest, hover shows gradient + chevron) collapses the lane.
-
-### Score sync pipeline
-
-```
-PDF  ──lyricsExtract──▶ LyricToken[]  ─┐
-                                       ├─alignSyncMap──▶ Anchor[]
-MP3  ──transcribe (sidecar)──▶ Word[] ─┘
-PDF canvases ──detectSystems──▶ bandsByPage (lazy, cached in PDFViewer handle)
-
-at playback time t:
-  resolveTimedPosition(timingModel, t) → TimedPosition
-  scrollMotion.advanceFollowTarget(rawTarget, t, state) → monotonic scroll target
-```
-
-**System detection** (`detectSystems.ts`): staff-first (detect staff lines → group into staves → group staves via barline connectivity). Per-staff barline scan (run ≥ 0.92 of staff height, touching both outer lines). Cross-staff alignment with `minBarlineStaves` vote. `pageSpanRatio` filter excludes page-spanning vertical rules.
-
-**Lyric extraction** (`lyricsExtract.ts`): font-agnostic, splits multi-word runs, strips digits/colons/PUA symbols, cue/stage-direction stripping. Tested on 38+ non-scan PDFs.
-
-**Alignment** (`alignSyncMap.ts`): many-to-one DP (each Whisper word absorbs a run of score syllables, scored on concatenation), longest monotonic chain with weighted continuity tiebreak.
-
-**Timing model** (`timingModel.ts`): MEASURE axis (all systems laid end-to-end with cumulative measure offsets). `resolveTimedPosition` interpolates linearly between bracketing anchors, with tempo-aware gap traversal (beat-clock when confident, measured-rate with lag factor when not). Outlier anchors pre-filtered. Outro extrapolation when `tempoStability ≥ 0.6`.
-
-**Scroll motion** (`scrollMotion.ts`): `dwellGlideBlend` (linear after 8% dwell), `adaptiveAnchorFraction` (0.33 confident → 0.52 low-confidence), `advanceFollowTarget` (monotonic ratchet, resets on seek detected by audio time).
-
-### Small hooks / utilities
-
-| File | Purpose |
-|---|---|
-| `useGainEnvelope` | Wraps a `GainNode` ref; exposes `setGainImmediate` / `rampGainTo` / `cancelRamps` |
-| `useVolumeEnvelope` | rAF-based ease-in-out volume animation for WaveSurfer's software volume |
-| `useTransportVisibility` | `expanded`/`collapsed` state for the dock (currently auto-collapse disabled) |
-| `pdfWorker` | Points `pdfjs-dist` at its bundled Web Worker — must be imported before any PDF rendering (done in `main.tsx`) |
-| `pdfThumbnail.ts` | Renders PDF page 1 to a small canvas for library card thumbnails |
-| `leadIn.ts` | Client-side onset-envelope cross-correlation for `leadInOffset` detection |
-| `assignLanes.ts` / `packIntervals` | Packs overlapping intervals into sub-lanes for margin bars and scrubber bands |
-| `scanCheck.ts` | `isScannedPdf()` — gates out raster PDFs from the sync pipeline |
-| `formatters.ts` | Time/duration formatting utilities |
+- [`app-shell.md`](docs/architecture/app-shell.md) — hash routing, SongView as state coordinator, AnalysisProvider, imperative handle ref pattern, background analysis legs, first-run migration
+- [`audio-engine.md`](docs/architecture/audio-engine.md) — Web Audio graph, WaveSurfer setup, loop fade/wrap mechanics, balance/mono/transpose DSP, lead-in offset, take recording, auto-scroll driver
+- [`pdf-viewer.md`](docs/architecture/pdf-viewer.md) — react-pdf rendering, scaling, system band detection, playhead follow rAF loop, margin loop bars, EdgeScrubberRail
+- [`score-sync.md`](docs/architecture/score-sync.md) — scan check, lyric extraction, Whisper transcription, system detection, alignment DP, measure-axis timing model, scroll motion math
+- [`persistence.md`](docs/architecture/persistence.md) — IndexedDB schema, typed CRUD, atomic read-merge-write, PracticeStore injection pattern, debounced flush
+- [`ui-system.md`](docs/architecture/ui-system.md) — TransportBar, AudioSlider, LoopLaneStrip, ContextBar, TrackSelector, EdgeScrubberRail, packIntervals
+- [`testing.md`](docs/architecture/testing.md) — test files, probe scripts, fixture corpus, Node constraints
 
 ### Temporarily disabled features
 
