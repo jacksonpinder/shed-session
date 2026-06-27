@@ -11,7 +11,6 @@ import {
 import { Document, Page } from 'react-pdf'
 import type { PDFDocumentProxy, PDFPageProxy } from 'pdfjs-dist'
 import { detectSystems, isLikelyScanned, bandForY, type SystemBand } from '../lib/detectSystems'
-import { adaptiveAnchorFraction, advanceFollowTarget, cappedScrollStep, EASE, USER_QUIET_MS } from '../lib/scrollMotion'
 import EdgeScrubberRail from './EdgeScrubberRail'
 import { packIntervals } from '../lib/assignLanes'
 
@@ -119,25 +118,6 @@ export type SyncHighlight = {
   time: number
 }
 
-/**
- * One frame's worth of "where to scroll", produced by PlayerDock's follow effect
- * from the timing model and consumed by the rAF follow loop. Pixel-agnostic: the
- * loop converts these page/ratio positions to scrollTop itself. `current`/`next`
- * are the playing system's top and the next system's top; `blend` (0…1) ramps
- * between them; `systemHeightRatio` keeps the current system fully on screen.
- */
-export type PlayheadAnchor = {
-  current: SheetPosition
-  next: SheetPosition
-  blend: number
-  /** Piece-level steadiness (timing model `tempoStability`, 0…1) → vertical anchor. Stable
-   * by design (not a per-frame value) so the look-ahead framing doesn't breathe/jitter. */
-  stability: number
-  systemHeightRatio: number
-  /** Audio time (s) this anchor was sampled at — lets the loop detect real seeks. */
-  time: number
-}
-
 export type PDFViewerHandle = {
   getSheetPosition: () => SheetPosition
   scrollToSheetPosition: (
@@ -147,11 +127,6 @@ export type PDFViewerHandle = {
   setSyncHighlight: (h: SyncHighlight | null) => void
   /** Detected system bands per page (1-based), for Score Sync's system-top mapping. */
   getSystemBands: () => Record<number, SystemBand[]>
-  /** Start the continuous playback auto-scroll; `getAnchor` is polled once per frame.
-   * `onManualScroll` fires once when the user scrolls by hand while following is active. */
-  startPlayheadFollow: (getAnchor: () => PlayheadAnchor | null, onManualScroll?: () => void) => void
-  /** Stop the continuous playback auto-scroll. */
-  stopPlayheadFollow: () => void
   zoomIn: () => void
   zoomOut: () => void
 }
@@ -215,25 +190,6 @@ const PDFViewer = forwardRef<PDFViewerHandle, PDFViewerProps>(function PDFViewer
   const chipRefsMapRef = useRef<Map<string, HTMLSpanElement>>(new Map())
   const updateChipSlotsRef = useRef<(() => void) | null>(null)
 
-  // Continuous playback auto-scroll (see startPlayheadFollow). The rAF loop polls
-  // followGetAnchorRef each frame and eases container.scrollTop toward the target.
-  const followGetAnchorRef = useRef<(() => PlayheadAnchor | null) | null>(null)
-  const followOnManualScrollRef = useRef<(() => void) | null>(null)
-  const followRafRef = useRef<number | null>(null)
-  // Float scrollTop we maintain (writes are rounded — keeps slow scrolls from
-  // stalling under integer rounding) and the timestamp until which a manual scroll
-  // gesture suspends following.
-  const followScrollTopRef = useRef<number | null>(null)
-  const followUserUntilRef = useRef(0)
-  // Timestamp of the previous follow frame, for the slew-rate limit's real dt.
-  const followLastFrameRef = useRef<number | null>(null)
-  // Monotonic-scroll ratchet: the running-max target, plus the last audio time, so a
-  // real backward/forward seek resets it while frac wobble can't reverse the scroll.
-  const followMaxTargetRef = useRef<number | null>(null)
-  const followLastTimeRef = useRef<number | null>(null)
-  // Last viewport size — a change (resize / orientation / zoom) reflows the PDF and
-  // invalidates every cached pixel target, so we drop the ratchet and resync.
-  const followGeomRef = useRef<{ w: number; h: number } | null>(null)
 
   const isTouch = useMediaQuery('(max-width: 1024px), (pointer: coarse)')
 
@@ -536,146 +492,6 @@ const PDFViewer = forwardRef<PDFViewerHandle, PDFViewerProps>(function PDFViewer
   // Keep the docY ref current so the scroll effect always calls the latest version.
   docYForPositionRef.current = docYForPosition
 
-  // One frame of the continuous auto-scroll: keep the playing system's top — ramped
-  // toward the next system's top by `blend` — pinned at an adaptive fraction down
-  // the viewport, easing scrollTop toward it. Yields when the user is scrolling.
-  const runFollowFrame = useCallback(() => {
-    const container = containerRef.current
-    const getAnchor = followGetAnchorRef.current
-    if (!container || !getAnchor) return
-    const now = typeof performance !== 'undefined' ? performance.now() : Date.now()
-    // Real frame dt (clamped) for the slew-rate limit — robust to dropped/backgrounded frames.
-    const dtSec = followLastFrameRef.current != null ? Math.min(0.1, (now - followLastFrameRef.current) / 1000) : 1 / 60
-    followLastFrameRef.current = now
-    let desired = followScrollTopRef.current ?? container.scrollTop
-    // A viewport resize / orientation change / zoom reflows the PDF, so every cached
-    // pixel target (and the ratchet's running-max) is stale. Drop them and resync so the
-    // next frame snaps to the correct line in the NEW geometry — and so the reflow's own
-    // scrollTop shift below isn't mistaken for a manual gesture.
-    const gw = container.clientWidth
-    const gh = container.clientHeight
-    const geom = followGeomRef.current
-    if (!geom || geom.w !== gw || geom.h !== gh) {
-      followGeomRef.current = { w: gw, h: gh }
-      followMaxTargetRef.current = null
-      followLastTimeRef.current = null
-      desired = container.scrollTop
-    }
-    // scrollTop moved away from our last write ⇒ a manual gesture / scrollbar drag — yield.
-    if (Math.abs(container.scrollTop - Math.round(desired)) > 2) {
-      followUserUntilRef.current = now + USER_QUIET_MS
-      desired = container.scrollTop
-    }
-    const anchor = getAnchor()
-    if (anchor && now >= followUserUntilRef.current) {
-      const curY = docYForPosition(anchor.current)
-      const nextY = docYForPosition(anchor.next)
-      if (curY != null && nextY != null) {
-        const viewport = container.clientHeight
-        const page = resolvePageElement(anchor.current.page, container)
-        const pageH = page ? getPageHeight(page) : 0
-        const systemHeightFrac =
-          pageH > 0 && viewport > 0 ? (anchor.systemHeightRatio * pageH) / viewport : 0
-        // Anchor fraction from the piece's STABLE steadiness (not a per-frame value), so
-        // it can't wobble; the small per-system step is smoothed by the easing below.
-        const frac = adaptiveAnchorFraction(anchor.stability, systemHeightFrac)
-        const anchorY = curY + (nextY - curY) * anchor.blend
-        const maxTop = Math.max(0, container.scrollHeight - viewport)
-        const rawTarget = clamp(anchorY - viewport * frac, 0, maxTop)
-        // Keep forward play monotonic; let real (time-based) seeks reposition. See
-        // advanceFollowTarget — this is what stops the anchor-fraction wobble from
-        // reading as an up/down jitter.
-        const { target, seeked, state } = advanceFollowTarget(rawTarget, anchor.time, {
-          maxTarget: followMaxTargetRef.current,
-          lastTime: followLastTimeRef.current,
-        })
-        followMaxTargetRef.current = state.maxTarget
-        followLastTimeRef.current = state.lastTime
-        if (seeked) {
-          desired = target // a real audio seek (loop/skip) repositions instantly
-        } else {
-          // Ease toward the target, but never advance faster than one system per
-          // MIN_SECONDS_PER_SYSTEM — so a mistimed-early anchor cluster glides past at
-          // tempo instead of yanking the sung measure off the top of the viewport.
-          const systemPx = anchor.systemHeightRatio * pageH
-          desired += cappedScrollStep((target - desired) * EASE, systemPx, dtSec)
-        }
-        container.scrollTop = Math.round(desired)
-      }
-    } else {
-      // Idle (no anchor yet) or yielding to the user: track scrollTop, don't fight it,
-      // and drop the ratchet so following resumes from wherever the user left off.
-      desired = container.scrollTop
-      followMaxTargetRef.current = null
-      followLastTimeRef.current = null
-    }
-    followScrollTopRef.current = desired
-  }, [containerRef, docYForPosition, resolvePageElement])
-
-  // Keep a stable loop fn so dep changes in the body don't tear down the rAF chain.
-  const runFollowFrameRef = useRef(runFollowFrame)
-  useEffect(() => {
-    runFollowFrameRef.current = runFollowFrame
-  }, [runFollowFrame])
-  const followLoop = useCallback(() => {
-    runFollowFrameRef.current()
-    followRafRef.current = window.requestAnimationFrame(followLoop)
-  }, [])
-
-  const startPlayheadFollow = useCallback(
-    (getAnchor: () => PlayheadAnchor | null, onManualScroll?: () => void) => {
-      followGetAnchorRef.current = getAnchor
-      followOnManualScrollRef.current = onManualScroll ?? null
-      if (followRafRef.current == null) {
-        followScrollTopRef.current = containerRef.current?.scrollTop ?? null
-        followMaxTargetRef.current = null
-        followLastTimeRef.current = null
-        followGeomRef.current = null
-        followRafRef.current = window.requestAnimationFrame(followLoop)
-      }
-    },
-    [containerRef, followLoop]
-  )
-
-  const stopPlayheadFollow = useCallback(() => {
-    if (followRafRef.current != null) {
-      window.cancelAnimationFrame(followRafRef.current)
-      followRafRef.current = null
-    }
-    followGetAnchorRef.current = null
-    followOnManualScrollRef.current = null
-  }, [])
-
-  // Suspend following the moment the user scrolls by hand (wheel / touch / nav keys).
-  useEffect(() => {
-    const container = containerRef.current
-    if (!container) return
-    const mark = () => {
-      followUserUntilRef.current =
-        (typeof performance !== 'undefined' ? performance.now() : Date.now()) + USER_QUIET_MS
-      // While actively following, a hand-scroll suspends auto-scroll for the rest of
-      // this listen (the parent decides re-enable on pause/seek/loop). Fire once: the
-      // parent clears `onManualScroll` via stopPlayheadFollow when it tears the loop down.
-      if (followRafRef.current != null) followOnManualScrollRef.current?.()
-    }
-    const onKey = (e: KeyboardEvent) => {
-      if (['PageUp', 'PageDown', 'ArrowUp', 'ArrowDown', 'Home', 'End', ' '].includes(e.key)) mark()
-    }
-    container.addEventListener('wheel', mark, { passive: true })
-    container.addEventListener('touchstart', mark, { passive: true })
-    container.addEventListener('touchmove', mark, { passive: true })
-    window.addEventListener('keydown', onKey)
-    return () => {
-      container.removeEventListener('wheel', mark)
-      container.removeEventListener('touchstart', mark)
-      container.removeEventListener('touchmove', mark)
-      window.removeEventListener('keydown', onKey)
-    }
-  }, [containerRef])
-
-  // Stop the loop on unmount.
-  useEffect(() => stopPlayheadFollow, [stopPlayheadFollow])
-
   // Re-run chip slot assignment whenever the loop set changes (no scroll needed).
   useEffect(() => {
     updateChipSlotsRef.current?.()
@@ -894,12 +710,10 @@ const PDFViewer = forwardRef<PDFViewerHandle, PDFViewerProps>(function PDFViewer
       scrollToSheetPosition,
       getSystemBands,
       setSyncHighlight,
-      startPlayheadFollow,
-      stopPlayheadFollow,
       zoomIn: handleZoomIn,
       zoomOut: handleZoomOut,
     }),
-    [getSheetPosition, scrollToSheetPosition, getSystemBands, setSyncHighlight, startPlayheadFollow, stopPlayheadFollow]
+    [getSheetPosition, scrollToSheetPosition, getSystemBands, setSyncHighlight]
   )
 
   useEffect(() => {

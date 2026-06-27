@@ -12,7 +12,7 @@ import {
   ArrowDown,
   ArrowUp,
   AudioLines,
-  Navigation,
+  MapPinned,
   Pause,
   Play,
   Repeat,
@@ -134,14 +134,11 @@ type TransportBarProps = {
   /** Whether repeat is on for the current context (loop if active, else whole song). */
   repeatActive?: boolean
   onToggleRepeat?: () => void
-  /** Whether auto-scroll is on for the current context. */
-  autoScrollActive?: boolean
-  /** False when the song has no sync map — the button greys out with a why-tooltip. */
-  autoScrollAvailable?: boolean
-  /** True when a hand-scroll has paused auto-scroll for this listen (tap to resume). */
-  autoScrollSuspended?: boolean
-  onResumeAutoScroll?: () => void
-  onToggleAutoScroll?: () => void
+  /** Whether jump-on-event is enabled. */
+  jumpOnEvent?: boolean
+  /** False when the song has no sync map — the button greys out. */
+  jumpOnEventAvailable?: boolean
+  onToggleJumpOnEvent?: () => void
   /** Track selector (docked at the left of the cluster). Hidden when empty. */
   tracks?: TrackOption[]
   activeTrackId?: string
@@ -205,11 +202,9 @@ export default function TransportBar({
   setTranspose,
   repeatActive,
   onToggleRepeat,
-  autoScrollSuspended,
-  onResumeAutoScroll,
-  autoScrollActive,
-  autoScrollAvailable = true,
-  onToggleAutoScroll,
+  jumpOnEvent,
+  jumpOnEventAvailable = true,
+  onToggleJumpOnEvent,
   tracks,
   activeTrackId,
   onSelectTrack,
@@ -1032,29 +1027,23 @@ export default function TransportBar({
             {backButton}
             {playButton}
             {forwardButton}
-            {onToggleAutoScroll && (
+            {onToggleJumpOnEvent && (
               <div className="relative">
                 <button
                   type="button"
-                  aria-label="Auto-scroll"
-                  aria-pressed={autoScrollAvailable ? autoScrollActive && !autoScrollSuspended : undefined}
-                  aria-disabled={!autoScrollAvailable}
+                  aria-label="Jump to score position"
+                  aria-pressed={jumpOnEventAvailable ? jumpOnEvent : undefined}
+                  aria-disabled={!jumpOnEventAvailable}
                   title={
-                    !autoScrollAvailable
-                      ? 'Auto-scroll needs a synced score'
-                      : autoScrollSuspended
-                        ? 'Auto-scroll paused — click to resume'
-                        : autoScrollActive
-                          ? 'Auto-scroll on'
-                          : 'Auto-scroll off'
+                    !jumpOnEventAvailable
+                      ? 'Score jump needs a synced score'
+                      : jumpOnEvent
+                        ? 'Score jumps on — tap to disable'
+                        : 'Score jumps off — tap to enable'
                   }
                   onClick={() => {
-                    if (autoScrollSuspended) {
-                      onResumeAutoScroll?.()
-                      return
-                    }
-                    if (autoScrollAvailable) {
-                      onToggleAutoScroll()
+                    if (jumpOnEventAvailable) {
+                      onToggleJumpOnEvent()
                       return
                     }
                     setSyncHintOpen(true)
@@ -1062,31 +1051,24 @@ export default function TransportBar({
                     syncHintTimerRef.current = window.setTimeout(() => setSyncHintOpen(false), 2600)
                   }}
                   onPointerEnter={(e) => {
-                    if (!autoScrollAvailable && e.pointerType === 'mouse') setSyncHintOpen(true)
+                    if (!jumpOnEventAvailable && e.pointerType === 'mouse') setSyncHintOpen(true)
                   }}
                   onPointerLeave={(e) => {
                     if (e.pointerType === 'mouse') setSyncHintOpen(false)
                   }}
                   className={`${controlButtonBase} ${iconButtonSize} ${
-                    !autoScrollAvailable
+                    !jumpOnEventAvailable
                       ? 'cursor-help opacity-40'
-                      : autoScrollSuspended
-                        ? 'text-amber-500'
-                        : autoScrollActive
-                          ? toggleActiveClass
-                          : ''
+                      : jumpOnEvent
+                        ? toggleActiveClass
+                        : ''
                   }`}
                 >
-                  <Navigation size={15} />
+                  <MapPinned size={15} />
                 </button>
-                {autoScrollSuspended && autoScrollAvailable && (
-                  <div className="absolute bottom-12 left-1/2 z-[9999] w-44 -translate-x-1/2 rounded-xl border border-amber-200 bg-white px-3 py-2 text-center text-[11px] font-medium leading-snug text-amber-700 shadow-xl">
-                    Click to turn auto-scroll back on
-                  </div>
-                )}
-                {syncHintOpen && !autoScrollAvailable && (
+                {syncHintOpen && !jumpOnEventAvailable && (
                   <div className="absolute bottom-12 left-1/2 z-[9999] w-44 -translate-x-1/2 rounded-xl border border-slate-200 bg-white px-3 py-2 text-[11px] font-medium leading-snug text-slate-600 shadow-xl">
-                    Auto-scroll needs a synced score — sync this song first.
+                    Score jump needs a synced score — sync this song first.
                   </div>
                 )}
               </div>

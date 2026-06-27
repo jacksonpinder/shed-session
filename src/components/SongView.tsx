@@ -73,7 +73,6 @@ export default function SongView({ songId, onBack }: SongViewProps) {
   const [anchors, setAnchors] = useState<Anchor[]>([])
   const [beat, setBeat] = useState<BeatAnalysis | undefined>(undefined)
   const [syncGenerating, setSyncGenerating] = useState(false)
-  const [autoScrollEnabled, setAutoScrollEnabled] = useState(false)
   const [overlayEnabled, setOverlayEnabled] = useState(true)
   const [manageOpen, setManageOpen] = useState(false)
   const lastDebugBundleRef = useRef<SyncDebugBundle | null>(null)
@@ -472,10 +471,6 @@ export default function SongView({ songId, onBack }: SongViewProps) {
                 <input type="checkbox" checked={overlayEnabled} onChange={(e) => setOverlayEnabled(e.target.checked)} />
                 overlay
               </label>
-              <label className="flex items-center gap-1 text-xs text-slate-600 select-none">
-                <input type="checkbox" checked={autoScrollEnabled} onChange={(e) => setAutoScrollEnabled(e.target.checked)} />
-                scroll
-              </label>
             </div>
           )}
         </div>
@@ -495,7 +490,6 @@ export default function SongView({ songId, onBack }: SongViewProps) {
           anchors={anchors}
           beat={beat}
           onAnchorsChange={setAnchors}
-          autoScrollEnabled={autoScrollEnabled}
           onLoopMarkersChange={handleLoopMarkersChange}
           markerActivateRef={markerActivateRef}
           createLoopRef={createLoopRef}

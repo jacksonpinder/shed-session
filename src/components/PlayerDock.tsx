@@ -19,13 +19,13 @@ import { deleteAudioBlob, getAudioBlob, putAudioBlob } from '../lib/audioStore'
 import { useGainEnvelope } from '../lib/useGainEnvelope'
 import { localStorageStore, type PracticeStore } from '../lib/storage'
 import { anchorAtTime, type Anchor } from '../lib/syncMap'
-import { buildTimingModel, resolveScrollSegment, type TimingModel } from '../lib/timingModel'
+import { buildTimingModel, resolveScrollSegment, resolveTimedPosition, type TimingModel } from '../lib/timingModel'
 import type { BeatAnalysis } from '../lib/transcribe'
 import { useTransportVisibility } from '../lib/useTransportVisibility'
 import TransportBar from './TransportBar'
 import LoopLaneStrip from './LoopLaneStrip'
 import type { TrackOption } from './TrackSelector'
-import type { PDFViewerHandle, PlayheadAnchor } from './PDFViewer'
+import type { PDFViewerHandle } from './PDFViewer'
 import type { SavedLoop, SheetPosition } from '../lib/types'
 
 const SAMPLE_URL = '/sample.mp3'
@@ -54,10 +54,10 @@ const SPEED_STORAGE_KEY = 'practice:speed'
 // selected; default on). Not per-loop.
 const REPEAT_SONG_STORAGE_KEY = 'practice:repeat-song'
 const REPEAT_LOOP_STORAGE_KEY = 'practice:repeat-loop'
-// D4: auto-scroll mirrors repeat — two independent global values sharing one button.
-// Default off with no loop, on with a loop selected. Gated on the song being synced.
-const AUTOSCROLL_SONG_STORAGE_KEY = 'practice:autoscroll-song'
-const AUTOSCROLL_LOOP_STORAGE_KEY = 'practice:autoscroll-loop'
+// D4 → jump-on-event: a single toggle controlling whether structural events (loop
+// repeat, loop switch, song restart) jump the score to the matching position.
+const JUMP_ON_EVENT_STORAGE_KEY = 'practice:jump-on-event'
+const JUMP_ONBOARDING_KEY = 'practice:jump-onboarding-shown'
 const TRANSPOSE_MIN_SEMITONES = -7
 const TRANSPOSE_MAX_SEMITONES = 7
 const SCROLL_THRESHOLD_PX = 10
@@ -284,7 +284,6 @@ type PlayerDockProps = {
   anchors?: Anchor[]
   beat?: BeatAnalysis
   onAnchorsChange?: (anchors: Anchor[]) => void
-  autoScrollEnabled?: boolean
   onLoopMarkersChange?: (markers: LoopSheetMarker[]) => void
   markerActivateRef?: MutableRefObject<((loopId: string) => void) | null>
   onSavedLoopsChange?: (loops: SavedLoop[]) => void
@@ -322,7 +321,6 @@ export default function PlayerDock(props: PlayerDockProps) {
     onSystemBandsReadyRef,
     anchors = [],
     beat,
-    autoScrollEnabled = false,
     tracks,
     activeTrackId,
     onSelectTrack,
@@ -377,9 +375,12 @@ export default function PlayerDock(props: PlayerDockProps) {
   // current-context flag the playback engine reads; these are the remembered toggles.
   const repeatSongRef = useRef(false)
   const repeatLoopRef = useRef(true)
-  // D4 global auto-scroll values (see *_STORAGE_KEY above).
-  const autoScrollSongRef = useRef(false)
-  const autoScrollLoopRef = useRef(true)
+  // D4 jump-on-event: whether structural events scroll the score.
+  const jumpOnEventRef = useRef(true)
+  const jumpOnboardingShownRef = useRef(
+    typeof localStorage !== 'undefined' && localStorage.getItem(JUMP_ONBOARDING_KEY) === 'true'
+  )
+  const scrubToastTimerRef = useRef<number | null>(null)
   const overlayRefs = useRef<{ left: any | null; right: any | null }>({
     left: null,
     right: null,
@@ -430,11 +431,7 @@ export default function PlayerDock(props: PlayerDockProps) {
   const [loopOn, setLoopOn] = useState(false)
   const [repeatSong, setRepeatSong] = useState(false)
   const [repeatLoop, setRepeatLoop] = useState(true)
-  const [autoScrollSong, setAutoScrollSong] = useState(false)
-  const [autoScrollLoop, setAutoScrollLoop] = useState(true)
-  // Transient (per-listen, not persisted): a hand-scroll during playback suspends
-  // auto-scroll until the next pause / seek / loop wrap, or a tap on the nav button.
-  const [autoScrollSuspended, setAutoScrollSuspended] = useState(false)
+  const [jumpOnEvent, setJumpOnEvent] = useState(true)
   // Increments whenever the timing model should be rebuilt: anchors/beat updated, or
   // the PDF first rendered system bands. loopMarkers depends on this so it recomputes
   // the moment both anchors AND bands are available, regardless of arrival order.
@@ -1022,9 +1019,7 @@ export default function PlayerDock(props: PlayerDockProps) {
           const activeLoop = savedLoopsRef.current.find((loop) => loop.id === scheduledId)
           const sheetLink = activeLoop?.sheetLink
           const loopScrollOnRepeat = activeLoop?.scrollOnRepeat ?? scrollOnRepeatRef.current
-          // When the continuous auto-scroll is following, it repositions after the
-          // loop seek on its own — don't also fire the per-loop sheet-link jump.
-          if (sheetLink && loopScrollOnRepeat && !autoScrollEnabledRef.current) {
+          if (sheetLink && loopScrollOnRepeat && jumpOnEventRef.current) {
             const viewer = pdfViewerRef?.current ?? null
             if (isPdfScrollingRef.current) {
               logSheetRepeat('skip', { reason: 'scrolling', loopId: scheduledId })
@@ -1032,6 +1027,7 @@ export default function PlayerDock(props: PlayerDockProps) {
               viewer.scrollToSheetPosition(sheetLink, { behavior: 'smooth' })
               logSheetRepeat('scroll', { loopId: scheduledId, page: sheetLink.page })
               showScrollRepeatPrompt()
+              fireJumpOnboarding()
             } else {
               logSheetRepeat('skip', { reason: 'no-viewer', loopId: scheduledId })
             }
@@ -1370,83 +1366,14 @@ export default function PlayerDock(props: PlayerDockProps) {
     [pdfViewerRef]
   )
 
-  // D4: the live auto-scroll flag is the current-context value (loop if active, else
-  // song). The dev `autoScrollEnabled` prop still force-enables for sync debugging.
-  const autoScrollActive =
-    (activeRegionId ? autoScrollLoop : autoScrollSong) || autoScrollEnabled
-  const autoScrollEnabledRef = useRef(autoScrollActive)
-  useEffect(() => {
-    autoScrollEnabledRef.current = autoScrollActive
-  }, [autoScrollActive])
-
-  // Continuous playback auto-scroll. While playing with auto-scroll on, hand the
-  // PDF viewer a per-frame "where to scroll" closure derived from the timing model:
-  // the playing system's top, ramped (dwell-then-glide) toward the next system's
-  // top, which the viewer pins at an adaptive fraction down the viewport. Parameter-
-  // ized by the measure axis (musical time), not horizontal pixels — see scrollMotion.
-  useEffect(() => {
-    const viewer = pdfViewerRef?.current
-    if (!viewer) return
-    if (!autoScrollActive || !isPlaying || autoScrollSuspended) {
-      viewer.stopPlayheadFollow()
-      return
-    }
-    let debugLastLogTime = -1
-    const getAnchor = (): PlayheadAnchor | null => {
-      const ws = waveSurferRef.current
-      const currentAnchors = anchorsRef.current
-      if (!ws || !currentAnchors.length) return null
-      const bands = viewer.getSystemBands()
-      // Build (and cache) the timing model on first use so systems with no matched
-      // words still scroll on time (the measure axis fills the gaps).
-      if (!timingModelRef.current && Object.keys(bands).length) {
-        timingModelRef.current = buildTimingModel(currentAnchors, bands, beatRef.current)
-        if (import.meta.env.DEV && timingModelRef.current) {
-          const m = timingModelRef.current
-          const last = m.samples[m.samples.length - 1]
-          console.warn(
-            `[SyncModel] built: ${m.samples.length} samples ` +
-            `lastAt=${last?.time.toFixed(2)}s μ=${last?.mu.toFixed(3)} ` +
-            `stability=${m.tempoStability.toFixed(3)} mps=${m.measuresPerSecond.toFixed(4)} ` +
-            `bandPages=${Object.keys(bands).length}`
-          )
-        }
-      }
-      const model = timingModelRef.current
-      if (import.meta.env.DEV) {
-        ;(window as Record<string, unknown>).__syncModel = model
-      }
-      if (!model) return null
-      const time = trackToSongTime(ws.getCurrentTime())
-      // Scroll between sync points at constant PIXEL velocity (see resolveScrollSegment):
-      // glide from one anchor's system to the next's by the time-fraction between them,
-      // so lyric-less stretches and page breaks sweep smoothly instead of pulsing.
-      const seg = resolveScrollSegment(model, time)
-      if (!seg) return null // low-confidence intro → yield to manual scroll
-      const sys = model.systems[seg.startSystem]
-      const next = model.systems[seg.endSystem] ?? sys
-      if (!sys) return null
-      // Dev-only: log scroll state once per second so gaps are diagnosable.
-      if (import.meta.env.DEV && time - debugLastLogTime >= 1) {
-        debugLastLogTime = time
-        console.info(
-          `[SyncScroll] t=${time.toFixed(2)}s sys=${seg.startSystem}(p${sys.page})→${seg.endSystem}(p${next.page}) ` +
-          `blend=${seg.blend.toFixed(3)} mps=${model.measuresPerSecond.toFixed(4)} stab=${model.tempoStability.toFixed(2)}`
-        )
-      }
-      return {
-        current: { page: sys.page, yWithinPageRatio: sys.band.topRatio },
-        next: { page: next.page, yWithinPageRatio: next.band.topRatio },
-        blend: seg.blend,
-        // Piece-level steadiness for the vertical anchor — stable, so it won't jitter.
-        stability: model.tempoStability,
-        systemHeightRatio: Math.max(0, sys.band.bottomRatio - sys.band.topRatio),
-        time,
-      }
-    }
-    viewer.startPlayheadFollow(getAnchor, () => setAutoScrollSuspended(true))
-    return () => viewer.stopPlayheadFollow()
-  }, [autoScrollActive, isPlaying, autoScrollSuspended, pdfViewerRef])
+  const fireJumpOnboarding = () => {
+    if (jumpOnboardingShownRef.current) return
+    jumpOnboardingShownRef.current = true
+    if (typeof localStorage !== 'undefined') localStorage.setItem(JUMP_ONBOARDING_KEY, 'true')
+    window.setTimeout(() => {
+      toast('Score jumped to follow playback — tap the map pin button to turn this off', { duration: 5000 })
+    }, 400)
+  }
 
   useEffect(() => {
     scrollOnRepeatRef.current = scrollOnRepeat
@@ -1460,6 +1387,10 @@ export default function PlayerDock(props: PlayerDockProps) {
       if (scrollRepeatPromptTimeoutRef.current !== null) {
         window.clearTimeout(scrollRepeatPromptTimeoutRef.current)
         scrollRepeatPromptTimeoutRef.current = null
+      }
+      if (scrubToastTimerRef.current !== null) {
+        window.clearTimeout(scrubToastTimerRef.current)
+        scrubToastTimerRef.current = null
       }
     }
   }, [])
@@ -1564,15 +1495,10 @@ export default function PlayerDock(props: PlayerDockProps) {
       repeatLoopRef.current = storedRepeatLoop
       setRepeatLoop(storedRepeatLoop)
     }
-    const storedAutoScrollSong = store.load<boolean>(AUTOSCROLL_SONG_STORAGE_KEY)
-    if (typeof storedAutoScrollSong === 'boolean') {
-      autoScrollSongRef.current = storedAutoScrollSong
-      setAutoScrollSong(storedAutoScrollSong)
-    }
-    const storedAutoScrollLoop = store.load<boolean>(AUTOSCROLL_LOOP_STORAGE_KEY)
-    if (typeof storedAutoScrollLoop === 'boolean') {
-      autoScrollLoopRef.current = storedAutoScrollLoop
-      setAutoScrollLoop(storedAutoScrollLoop)
+    const storedJumpOnEvent = store.load<boolean>(JUMP_ON_EVENT_STORAGE_KEY)
+    if (typeof storedJumpOnEvent === 'boolean') {
+      jumpOnEventRef.current = storedJumpOnEvent
+      setJumpOnEvent(storedJumpOnEvent)
     }
     // No loop is active at hydration, so the live flag reflects the song value.
     setLoopOn(repeatSongRef.current)
@@ -1620,9 +1546,8 @@ export default function PlayerDock(props: PlayerDockProps) {
     store.save(TRANSPOSE_STORAGE_KEY, transpose)
     store.save(REPEAT_SONG_STORAGE_KEY, repeatSong)
     store.save(REPEAT_LOOP_STORAGE_KEY, repeatLoop)
-    store.save(AUTOSCROLL_SONG_STORAGE_KEY, autoScrollSong)
-    store.save(AUTOSCROLL_LOOP_STORAGE_KEY, autoScrollLoop)
-  }, [hasHydrated, balance, mono, transpose, repeatSong, repeatLoop, autoScrollSong, autoScrollLoop])
+    store.save(JUMP_ON_EVENT_STORAGE_KEY, jumpOnEvent)
+  }, [hasHydrated, balance, mono, transpose, repeatSong, repeatLoop, jumpOnEvent])
 
   useEffect(() => {
     if (!hasHydrated) {
@@ -1791,7 +1716,6 @@ export default function PlayerDock(props: PlayerDockProps) {
         logLoopBg('wsPlay', { currentTime: waveSurfer.getCurrentTime() })
       }
       setIsPlaying(true)
-      setAutoScrollSuspended(false) // a fresh listen starts with auto-scroll live
       syncTakePlayback(waveSurfer.getCurrentTime(), true)
       const pendingFade = pendingFadeInRef.current
       if (pendingFade) {
@@ -1815,7 +1739,6 @@ export default function PlayerDock(props: PlayerDockProps) {
         logLoopBg('wsPause', { currentTime: waveSurfer.getCurrentTime() })
       }
       setIsPlaying(false)
-      setAutoScrollSuspended(false) // pausing re-arms auto-scroll for the next listen
       cancelLoopFades()
       clearLoopTimers()
       stopTakePlayback()
@@ -1846,23 +1769,43 @@ export default function PlayerDock(props: PlayerDockProps) {
         return
       }
       setIsPlaying(false)
-      setAutoScrollSuspended(false)
       cancelLoopFades()
       stopTakePlayback()
     })
 
-    // Any seek — loop wrap, skip, scrub — starts a new pass, so re-arm auto-scroll.
     waveSurfer.on('seeking', () => {
       if (destroyed || waveSurferRef.current !== waveSurfer) return
-      setAutoScrollSuspended(false)
     })
 
     waveSurfer.on('interaction', (time: number) => {
       if (destroyed || waveSurferRef.current !== waveSurfer) {
         return
       }
-      setAutoScrollSuspended(false)
       cancelLoopFades()
+      if (jumpOnEventRef.current && anchorsRef.current.length > 0) {
+        if (scrubToastTimerRef.current !== null) {
+          window.clearTimeout(scrubToastTimerRef.current)
+        }
+        scrubToastTimerRef.current = window.setTimeout(() => {
+          scrubToastTimerRef.current = null
+        }, 3000)
+        toast('Scrubbed to new position', {
+          id: 'scrub-jump-toast',
+          duration: 3000,
+          action: {
+            label: 'Jump to score',
+            onClick: () => {
+              const model = timingModelRef.current
+              const ws = waveSurferRef.current
+              const viewer = pdfViewerRef?.current
+              if (!model || !ws || !viewer) return
+              const t = trackToSongTime(ws.getCurrentTime())
+              const pos = resolveTimedPosition(model, t)
+              if (pos) viewer.scrollToSheetPosition({ page: pos.page, yWithinPageRatio: pos.yWithinPageRatio }, { behavior: 'smooth' })
+            },
+          },
+        })
+      }
       if (dragSeekRef.current) {
         skipFadeUntilTimeRef.current = time
       }
@@ -1915,8 +1858,6 @@ export default function PlayerDock(props: PlayerDockProps) {
               time: anchor.time,
             })
           }
-          // Auto-scroll is driven continuously by the playhead-follow effect below
-          // (PDFViewer.startPlayheadFollow), not per timeupdate tick.
         }
       }
       runDriftGuard(time, 'timeupdate')
@@ -3032,13 +2973,20 @@ export default function PlayerDock(props: PlayerDockProps) {
         ensureAudioContext()
         ws.play()
         scheduleLoopTimers({ skipFadeIn: true })
+        if (jumpOnEventRef.current) {
+          scrollToLoopMarker(regionId)
+          fireJumpOnboarding()
+        }
       } else {
         // C1: paused + loop selected → don't start playback. Position the cursor at
         // the loop start, prime the fade-in for the next play, and scroll the PDF to
         // the loop's start so the user sees where the loop begins.
         pendingFadeInRef.current = bounds
         setGainImmediate(LOOP_MIN_VOLUME)
-        scrollToLoopMarker(regionId)
+        if (jumpOnEventRef.current) {
+          scrollToLoopMarker(regionId)
+          fireJumpOnboarding()
+        }
       }
     }
     updateGreyOverlays(region)
@@ -3209,6 +3157,10 @@ export default function PlayerDock(props: PlayerDockProps) {
       ws.play()
     }
     scheduleLoopTimers()
+    if (jumpOnEventRef.current && !activeRegionIdRef.current && next === 0 && current > 0) {
+      pdfViewerRef?.current?.scrollToSheetPosition({ page: 1, yWithinPageRatio: 0 }, { behavior: 'smooth' })
+      fireJumpOnboarding()
+    }
   }
 
   const togglePlay = () => {
@@ -3237,18 +3189,10 @@ export default function PlayerDock(props: PlayerDockProps) {
     }
   }
 
-  // D4: toggle the auto-scroll value for the current context (loop vs song), mirroring
-  // toggleRepeat. Both values are global per-song.
-  const toggleAutoScroll = () => {
-    if (activeRegionIdRef.current) {
-      const next = !autoScrollLoopRef.current
-      autoScrollLoopRef.current = next
-      setAutoScrollLoop(next)
-    } else {
-      const next = !autoScrollSongRef.current
-      autoScrollSongRef.current = next
-      setAutoScrollSong(next)
-    }
+  const toggleJumpOnEvent = () => {
+    const next = !jumpOnEventRef.current
+    jumpOnEventRef.current = next
+    setJumpOnEvent(next)
   }
 
   const handleTransportPointerEnter: PointerEventHandler<HTMLDivElement> = (event) => {
@@ -3340,11 +3284,9 @@ export default function PlayerDock(props: PlayerDockProps) {
                   setTranspose={setTranspose}
                   repeatActive={loopOn}
                   onToggleRepeat={toggleRepeat}
-                  autoScrollActive={autoScrollActive}
-                  autoScrollAvailable={anchors.length > 0}
-                  autoScrollSuspended={autoScrollSuspended}
-                  onResumeAutoScroll={() => setAutoScrollSuspended(false)}
-                  onToggleAutoScroll={toggleAutoScroll}
+                  jumpOnEvent={jumpOnEvent}
+                  jumpOnEventAvailable={anchors.length > 0}
+                  onToggleJumpOnEvent={toggleJumpOnEvent}
                   tracks={tracks}
                   activeTrackId={activeTrackId}
                   onSelectTrack={onSelectTrack}
