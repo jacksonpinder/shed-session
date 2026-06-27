@@ -189,6 +189,9 @@ const PDFViewer = forwardRef<PDFViewerHandle, PDFViewerProps>(function PDFViewer
   // Chip DOM refs — direct DOM updates on scroll (no React state) for dynamic stacking.
   const chipRefsMapRef = useRef<Map<string, HTMLSpanElement>>(new Map())
   const updateChipSlotsRef = useRef<(() => void) | null>(null)
+  // In-flight handle for the custom fast scroll tween (animateScrollTo). Bounded and
+  // self-terminating; cancelled on each new call and on unmount so it can't leak.
+  const scrollAnimRef = useRef<number | null>(null)
 
 
   const isTouch = useMediaQuery('(max-width: 1024px), (pointer: coarse)')
@@ -449,6 +452,43 @@ const PDFViewer = forwardRef<PDFViewerHandle, PDFViewerProps>(function PDFViewer
     }
   }, [containerRef, currentPage, getPageOffsetTop, resolvePageElement])
 
+  const cancelScrollAnim = useCallback(() => {
+    if (scrollAnimRef.current != null) {
+      window.cancelAnimationFrame(scrollAnimRef.current)
+      scrollAnimRef.current = null
+    }
+  }, [])
+
+  // Custom fast scroll: a fixed-duration easeInOutCubic tween, so near and far jumps
+  // feel equally snappy (native `behavior:'smooth'` drags on long, cross-page jumps).
+  // Cancels any in-flight tween first, so rapid seeks retarget cleanly.
+  const animateScrollTo = useCallback(
+    (targetTop: number, duration = 320) => {
+      const container = containerRef.current
+      if (!container) return
+      cancelScrollAnim()
+      const startTop = container.scrollTop
+      const delta = targetTop - startTop
+      if (Math.abs(delta) < 1) {
+        container.scrollTop = targetTop
+        return
+      }
+      const start = typeof performance !== 'undefined' ? performance.now() : Date.now()
+      const ease = (t: number) => (t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2)
+      const step = (now: number) => {
+        const p = Math.min(1, (now - start) / duration)
+        container.scrollTop = startTop + delta * ease(p)
+        if (p < 1) {
+          scrollAnimRef.current = window.requestAnimationFrame(step)
+        } else {
+          scrollAnimRef.current = null
+        }
+      }
+      scrollAnimRef.current = window.requestAnimationFrame(step)
+    },
+    [containerRef, cancelScrollAnim]
+  )
+
   const scrollToSheetPosition = useCallback(
     (pos: SheetPosition, opts?: { behavior?: 'auto' | 'smooth' }) => {
       const container = containerRef.current
@@ -465,13 +505,19 @@ const PDFViewer = forwardRef<PDFViewerHandle, PDFViewerProps>(function PDFViewer
           ? Math.round(pageRect.height * SCROLL_PADDING_RATIO)
           : SCROLL_PADDING_PX
       const top = page ? getPageOffsetTop(page, container) + offset - visualOffset : offset - visualOffset
-      container.scrollTo({
-        top: Math.max(0, top),
-        behavior: opts?.behavior ?? 'auto',
-      })
+      const finalTop = Math.max(0, top)
+      if ((opts?.behavior ?? 'auto') === 'smooth') {
+        animateScrollTo(finalTop)
+      } else {
+        cancelScrollAnim()
+        container.scrollTop = finalTop
+      }
     },
-    [containerRef, currentPage, getPageOffsetTop, numPages, resolvePageElement, resolveYWithinPagePx]
+    [animateScrollTo, cancelScrollAnim, containerRef, currentPage, getPageOffsetTop, numPages, resolvePageElement, resolveYWithinPagePx]
   )
+
+  // Cancel any in-flight scroll tween on unmount.
+  useEffect(() => cancelScrollAnim, [cancelScrollAnim])
 
   // Absolute scroll-Y (within the scroll container) of a sheet position — the same
   // page-offset + within-page math scrollToSheetPosition uses, minus the padding.

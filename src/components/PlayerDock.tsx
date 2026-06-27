@@ -19,7 +19,7 @@ import { deleteAudioBlob, getAudioBlob, putAudioBlob } from '../lib/audioStore'
 import { useGainEnvelope } from '../lib/useGainEnvelope'
 import { localStorageStore, type PracticeStore } from '../lib/storage'
 import { anchorAtTime, type Anchor } from '../lib/syncMap'
-import { buildTimingModel, resolveScrollSegment, resolveTimedPosition, type TimingModel } from '../lib/timingModel'
+import { buildTimingModel, resolveScrollSegment, type TimingModel } from '../lib/timingModel'
 import type { BeatAnalysis } from '../lib/transcribe'
 import { useTransportVisibility } from '../lib/useTransportVisibility'
 import TransportBar from './TransportBar'
@@ -380,7 +380,6 @@ export default function PlayerDock(props: PlayerDockProps) {
   const jumpOnboardingShownRef = useRef(
     typeof localStorage !== 'undefined' && localStorage.getItem(JUMP_ONBOARDING_KEY) === 'true'
   )
-  const scrubToastTimerRef = useRef<number | null>(null)
   const overlayRefs = useRef<{ left: any | null; right: any | null }>({
     left: null,
     right: null,
@@ -1375,6 +1374,26 @@ export default function PlayerDock(props: PlayerDockProps) {
     }, 400)
   }
 
+  // Unified score-follow on user navigation (seek buttons, scrub). Gated on the
+  // jump-on-event toggle; resolves the song time to a system via the same engine as
+  // the loop markers (resolveLoopSheetPosition) and fast-scrolls the score there.
+  const scrollScoreToSongTime = useCallback(
+    (songTime: number) => {
+      if (!jumpOnEventRef.current) return
+      const viewer = pdfViewerRef?.current
+      if (!viewer) return
+      // Restart to the very top resolves to page 1 even when the intro is too unsteady
+      // for the timing model to return a segment.
+      const pos =
+        resolveLoopSheetPosition(songTime) ??
+        (songTime <= 0.05 ? { page: 1, yWithinPageRatio: 0 } : null)
+      if (!pos) return
+      viewer.scrollToSheetPosition(pos, { behavior: 'smooth' })
+      fireJumpOnboarding()
+    },
+    [pdfViewerRef, resolveLoopSheetPosition]
+  )
+
   useEffect(() => {
     scrollOnRepeatRef.current = scrollOnRepeat
     if (!scrollOnRepeat) {
@@ -1387,10 +1406,6 @@ export default function PlayerDock(props: PlayerDockProps) {
       if (scrollRepeatPromptTimeoutRef.current !== null) {
         window.clearTimeout(scrollRepeatPromptTimeoutRef.current)
         scrollRepeatPromptTimeoutRef.current = null
-      }
-      if (scrubToastTimerRef.current !== null) {
-        window.clearTimeout(scrubToastTimerRef.current)
-        scrubToastTimerRef.current = null
       }
     }
   }, [])
@@ -1782,30 +1797,9 @@ export default function PlayerDock(props: PlayerDockProps) {
         return
       }
       cancelLoopFades()
-      if (jumpOnEventRef.current && anchorsRef.current.length > 0) {
-        if (scrubToastTimerRef.current !== null) {
-          window.clearTimeout(scrubToastTimerRef.current)
-        }
-        scrubToastTimerRef.current = window.setTimeout(() => {
-          scrubToastTimerRef.current = null
-        }, 3000)
-        toast('Scrubbed to new position', {
-          id: 'scrub-jump-toast',
-          duration: 3000,
-          action: {
-            label: 'Jump to score',
-            onClick: () => {
-              const model = timingModelRef.current
-              const ws = waveSurferRef.current
-              const viewer = pdfViewerRef?.current
-              if (!model || !ws || !viewer) return
-              const t = trackToSongTime(ws.getCurrentTime())
-              const pos = resolveTimedPosition(model, t)
-              if (pos) viewer.scrollToSheetPosition({ page: pos.page, yWithinPageRatio: pos.yWithinPageRatio }, { behavior: 'smooth' })
-            },
-          },
-        })
-      }
+      // Scrub/click on the waveform fires `interaction` once with the final time →
+      // jump the score to that spot (gated by the jump-on-event toggle).
+      scrollScoreToSongTime(trackToSongTime(time))
       if (dragSeekRef.current) {
         skipFadeUntilTimeRef.current = time
       }
@@ -3157,10 +3151,9 @@ export default function PlayerDock(props: PlayerDockProps) {
       ws.play()
     }
     scheduleLoopTimers()
-    if (jumpOnEventRef.current && !activeRegionIdRef.current && next === 0 && current > 0) {
-      pdfViewerRef?.current?.scrollToSheetPosition({ page: 1, yWithinPageRatio: 0 }, { behavior: 'smooth' })
-      fireJumpOnboarding()
-    }
+    // Seek buttons use programmatic setTime (no `interaction` event), so jump the
+    // score here. trackToSongTime maps the track-time cursor back to song time.
+    scrollScoreToSongTime(trackToSongTime(next))
   }
 
   const togglePlay = () => {
