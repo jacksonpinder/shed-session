@@ -1942,16 +1942,19 @@ export default function PlayerDock(props: PlayerDockProps) {
 
     const handlePointerDown = (event: PointerEvent) => {
       setIsPointerDown(true)
-      if (!activeRegionIdRef.current) {
-        return
-      }
       if (resizingRegionRef.current) {
         return
       }
       if (isPointerOnHandle(event.clientX, event.clientY)) {
         return
       }
-      dragSeekRef.current = true
+      if (activeRegionIdRef.current) {
+        // Loop-active: take over seeking entirely so we can detect outside-clicks.
+        dragSeekRef.current = true
+      }
+      // Seek the playhead immediately on press-down (before any drag or release)
+      // so the cursor feels responsive. In free-play WaveSurfer still handles its
+      // own click/dragend; in loop-active mode we own the whole pointer lifecycle.
       seekToClientX(event.clientX)
     }
 
