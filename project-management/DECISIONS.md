@@ -85,3 +85,27 @@ _Architectural and UX decisions with rationale. Add an entry whenever a non-obvi
 **Why:** Inset shadows were being clipped by the loop lane container's `overflow: hidden` even though the container width matched the waveform. Outward shadows render cleanly outside the box boundary.
 **Trade-off:** Outward shadows require the parent container to have `overflow: visible`, which increases the risk of accidental overflow of sibling content. Mitigated by ensuring the lane's inset positioning and zIndex layering contain it.
 **Status (2026-06-26):** After test, confirmed chips at far left/right edges now display selection rings cleanly without clipping. Outward shadow is the persistent solution.
+
+---
+
+## Annotation Layer
+
+### In-flow horizontal toolbar vs. fixed vertical sidebar
+**Decision:** Annotation toolbar is in-flow (pushes the PDF down) and horizontal (stretching full width), not fixed/overlaid and vertical.
+**Why:** Musicians need to see the score while annotating. A floating overlay hides content behind it with no easy workaround. In-flow pushes the viewport down, ensuring all content is reachable. Horizontal layout fits naturally in the component flow above the PDF.
+**Trade-off:** The toolbar takes vertical space. Mitigated by keeping it compact (h-11, ~44px) and using popovers for color/width pickers so controls don't expand inline.
+
+### Popover pickers for colors and widths
+**Decision:** Color and width options live in popovers (chip+chevron → grid), not inline lists.
+**Why:** Reclaims horizontal space in the toolbar. Most users pick a color/width once and draw; the picker is a secondary control. Popovers keep the toolbar visually lightweight.
+**Trade-off:** One extra tap to access options. Mitigated by showing the active value in the chip (color dot, squiggly width sample) so the user knows what's current at a glance.
+
+### Warm manila background (#faf3e0) for write mode
+**Decision:** Write-mode background is a low-saturation cream (`#faf3e0`), not amber or teal.
+**Why:** Visually evokes physical paper or a sketchpad on a table — the strongest "draft / annotation mode" association. Warmer than sage, less saturated than amber; reads as calm and paper-like.
+**Trade-off:** Cream is closer to the white PDF page than other colors, so the contrast is subtle. Mitigated by the amber tint still being noticeably warm (not white).
+
+### Cursor icons as exact lucide SVG paths
+**Decision:** Cursor SVGs are the exact icon paths from lucide-react (`Pencil`, `Highlighter`, `Eraser`), not bespoke designs.
+**Why:** Pixel-perfect consistency with the toolbar icons. The user sees the icon in the button, then that same icon as their cursor — no ambiguity about which tool is active.
+**Trade-off:** Lucide stroke-width (2px) is fine at 20–24px sizes (icons) but can look faint at smaller cursor sizes. Mitigated by using the icons at 24px with solid `stroke` and no fill.

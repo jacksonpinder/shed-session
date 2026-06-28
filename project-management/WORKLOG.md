@@ -130,6 +130,45 @@ The app is in a working state. Key features all landed and verified:
 
 ---
 
+## 2026-06-28 — Annotation feature: UI refinement & merge
+
+**What was done:**
+- **UI refinement per user feedback:**
+  - Horizontal in-flow toolbar (pushes PDF down) instead of fixed vertical sidebar
+  - Compact color + width pickers: chip+chevron → popover panel with grid of options
+  - Width preview lines are S-curves with round caps (look like real brushstrokes, not flat bars)
+  - Canvas rendering bug fixed: cancel pending rAF before scheduling in annotations effect so new strokes always paint
+  - Pencil toggle: 42×42 (enlarged), desktop aligns under zoom cluster (`right-[80px]`), mobile at `top-2`; `isMobile` is now reactive
+  - Eraser disables both color and width pickers (greyed out, same as width-only was before)
+  - Removed Clear all / Trash button entirely
+  - Write-mode background: warm manila `#faf3e0` (low-saturation cream, reads as "paper on table")
+  - Dropped backdrop-blur (was causing headless screenshot timeout; unnecessary anyway since toolbar is in-flow)
+- **Toolbar stacking context fix:** Lifted entire toolbar with `relative z-40` so popovers paint above the PDF/canvas/ContextBar
+- **Cursor icons:** Exact lucide `Pencil`, `Highlighter`, `Eraser` paths as SVG data-URIs (not generic or separate designs)
+- **All toolbar items centered** via `justify-center` (no spacer)
+- **Committed changes** to `feature/annotations`, pushed to origin
+- **PR created and merged** to main via GitHub web form
+
+**Decisions made:**
+- Horizontal toolbar over vertical: better UX when it occludes content (can still reach occluded area via scroll)
+- Warm manila over other tints (soft teal, sage, amber): strongest "paper/draft mode" association per visual brainstorm
+- Popover pickers over inline lists: reclaims vertical space in compact scenarios, cleaner toolbar appearance
+- Cursor icons exact to toolbar icons: pixel-perfect consistency, user knows what each cursor does
+
+**What's next:**
+- C4 & B6 remain (loop rename + LoopDetail removal, legacy sheetLinkDraft cleanup)
+- D3 mobile: audio settings bottom sheet
+- Feature-capture iteration on loop lane, audio controls polish
+
+**Handoff state:**
+✅ App loads and renders correctly. Annotation feature is live and merged to main.
+✅ All 8 test suites pass; production build succeeds.
+✅ Feature verified in-browser: draw/erase, gestures, persistence, dropdowns, mobile/desktop toggle placement.
+⚠️ Two-finger gesture detection on touch works; `endPointer` has belt-and-suspenders reset to catch edge cases.
+ℹ️ Highlight strokes use `source-over` at 0.35 alpha (not multiply, which blacks-out on transparent canvas).
+
+---
+
 ## [Previous sessions — reconstructed from memory]
 
 ### 2026-06 (multi-session) — Score Sync pipeline (Phases 1–7)

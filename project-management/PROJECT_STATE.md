@@ -2,7 +2,7 @@
 
 _Update this file whenever a significant piece of work lands or the focus shifts._
 
-## Current Architecture (as of 2026-06-25)
+## Current Architecture (as of 2026-06-28)
 
 ### App shell
 
@@ -52,6 +52,8 @@ Scan gate: `isScannedPdf()` in `scanCheck.ts` (image-present + ≤8 path ops per
 
 **Edge scrubber rail** (`EdgeScrubberRail.tsx`, 60px): stacked white page cards with loop bands in a left gutter, draggable teal viewport window, hover chip per loop.
 
+**Annotation layer** (`AnnotationCanvas.tsx`): Per-page transparent `<canvas>` overlaid at `z-25`. Writes to IndexedDB via `AnnotationContext` on a 500ms debounce. Supports pen (red default), highlighter (yellow, translucent), and eraser (stroke-level). Smooth rendering via Catmull-Rom→Bézier spline with no external dependencies. Normalized [0–1] coordinates survive zoom changes.
+
 ### Transport (`TransportBar.tsx`)
 
 Three-zone grid (`1fr auto 1fr`): left = Add/Exit loop button; center = pill (Repeat / Back / Play / Forward / Nav); right = AudioLines button. `AudioLines` opens a stacked panel with Speed / Transpose / Balance+Mono sliders (`AudioSlider`). All purely presentational — state and logic in `PlayerDock`.
@@ -64,7 +66,7 @@ Expanded: color-coded rows of loop chips with a connector bracket from the activ
 
 ## Active Work
 
-_Tier 1 & 2 polish complete (2026-06-26). No active work — see BACKLOG.md for what's next._
+_Annotations feature completed and merged to main (2026-06-28). See BACKLOG.md for next priorities._
 
 ---
 
@@ -79,8 +81,8 @@ _Tier 1 & 2 polish complete (2026-06-26). No active work — see BACKLOG.md for 
 | B6: Legacy sheetLinkDraft machinery | `sheetLink`/`isDraft`/draft trio wired into LoopDetail. Remove together with C4. |
 | C4: LoopDetail card | To be removed; replaced with inline name edit + trash-with-undo on the loop button. |
 | Demo song | Needs separate bundled PDF+MP3 assets (not `public/sample.mp3` + `public/sheetmusic.pdf`). |
-| Dead-code in TransportBar | `speedMenuOpen`, `transposeOpen`, `balanceOpen` state, button refs and click-outside effects are now unused. |
 | Lead-in nudge control | Currently reference = first uploaded track; no manual UI to nudge offset or change reference. |
+| Annotation feature: tooltip hints on toolbar | Popover panels could benefit from brief help text on first use or hover (tool names, width preview scale). |
 
 ---
 
