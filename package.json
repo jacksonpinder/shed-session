@@ -8,7 +8,7 @@
     "build": "vite build",
     "typecheck": "tsc --noEmit",
     "preview": "vite preview",
-    "test": "node --experimental-strip-types tests/extractLyrics.test.ts && node --experimental-strip-types tests/alignSyncMap.test.ts && node --experimental-strip-types tests/pipeline.test.ts && node --experimental-strip-types tests/timingModel.test.ts && node --experimental-strip-types tests/scrollMotion.test.ts && node --experimental-strip-types tests/library.test.ts && node --experimental-strip-types tests/leadIn.test.ts"
+    "test": "node --experimental-strip-types tests/extractLyrics.test.ts && node --experimental-strip-types tests/alignSyncMap.test.ts && node --experimental-strip-types tests/pipeline.test.ts && node --experimental-strip-types tests/timingModel.test.ts && node --experimental-strip-types tests/scrollMotion.test.ts && node --experimental-strip-types tests/library.test.ts && node --experimental-strip-types tests/leadIn.test.ts && node --experimental-strip-types tests/annotations.test.ts"
   },
   "devDependencies": {
     "@types/react": "^19.2.9",
