@@ -532,14 +532,21 @@ function WriteModeToggle() {
 
   const handleToggle = () => {
     const next = !writeMode
+    // Mode entry must always succeed — toggle before any best-effort hint work.
     setWriteMode(next)
     // First entry into write mode on a touch device: hint that two fingers scroll
-    // (one finger now draws). Once per browser session.
+    // (one finger now draws). Once per browser session. Storage access can throw
+    // in Safari private mode / when storage is disabled — that must not break the
+    // toggle, so the whole best-effort block is guarded.
     if (next && typeof window !== 'undefined') {
-      const isTouch = window.matchMedia?.('(pointer: coarse)').matches
-      if (isTouch && !sessionStorage.getItem('anno:scrollHintShown')) {
-        toast('Two fingers to scroll', { duration: 3000 })
-        sessionStorage.setItem('anno:scrollHintShown', '1')
+      try {
+        const isTouch = window.matchMedia?.('(pointer: coarse)').matches
+        if (isTouch && !sessionStorage.getItem('anno:scrollHintShown')) {
+          toast('Two fingers to scroll', { duration: 3000 })
+          sessionStorage.setItem('anno:scrollHintShown', '1')
+        }
+      } catch {
+        // storage unavailable (private mode) — skip the hint; mode toggle still works
       }
     }
   }
