@@ -531,11 +531,20 @@ export default function SongView({ songId, onBack }: SongViewProps) {
 function WriteModeToggle() {
   const { writeMode, setWriteMode } = useAnnotations()
 
-  // Match the same breakpoint ContextBar uses to show/hide zoom buttons.
-  const isMobile =
+  // Match the same breakpoint ContextBar uses to show/hide zoom buttons, and stay
+  // reactive so a tablet rotating portrait↔landscape repositions the button.
+  const [isMobile, setIsMobile] = useState(() =>
     typeof window !== 'undefined'
       ? window.matchMedia('(max-width: 1024px), (pointer: coarse)').matches
       : false
+  )
+  useEffect(() => {
+    if (typeof window === 'undefined') return
+    const mql = window.matchMedia('(max-width: 1024px), (pointer: coarse)')
+    const handler = (e: MediaQueryListEvent) => setIsMobile(e.matches)
+    mql.addEventListener('change', handler)
+    return () => mql.removeEventListener('change', handler)
+  }, [])
 
   // Hidden while in write mode — toolbar's Done button handles exit.
   if (writeMode) return null
@@ -562,11 +571,14 @@ function WriteModeToggle() {
       onClick={handleEnter}
       aria-label="Annotate"
       title="Annotate"
-      className={`pointer-events-auto fixed right-3 z-40 flex h-8 w-8 items-center justify-center rounded-full border border-slate-200 bg-white text-[#0b1220] shadow transition hover:bg-slate-50 hover:border-slate-300 hover:shadow-md active:bg-slate-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#4F7F7A]/40 ${
-        isMobile ? 'top-2' : 'top-14'
+      // Desktop: align under the zoom cluster, which sits at right = px-3 (12px) +
+      // mr-[68px] to clear the edge scrubber rail → right-[80px]. Mobile/touch: zoom
+      // buttons are hidden, so float at the top-right next to the back-button row.
+      className={`pointer-events-auto fixed z-40 flex h-[42px] w-[42px] items-center justify-center rounded-full border border-slate-200 bg-white text-[#0b1220] shadow transition hover:bg-slate-50 hover:border-slate-300 hover:shadow-md active:bg-slate-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#4F7F7A]/40 ${
+        isMobile ? 'right-3 top-2' : 'right-[80px] top-14'
       }`}
     >
-      <Pencil size={16} />
+      <Pencil size={19} />
     </button>
   )
 }

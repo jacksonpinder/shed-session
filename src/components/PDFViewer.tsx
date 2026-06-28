@@ -778,7 +778,7 @@ const PDFViewer = forwardRef<PDFViewerHandle, PDFViewerProps>(function PDFViewer
       <div
         ref={containerRef}
         className={`no-scrollbar relative h-full w-full overflow-y-auto overflow-x-hidden touch-pan-y touch-pinch-zoom${
-          writeMode ? ' bg-amber-100' : ''
+          writeMode ? ' bg-[#faf3e0]' : ''
         }`}
       >
         {error ? (
