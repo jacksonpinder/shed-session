@@ -8,7 +8,11 @@ export const BLOBS_STORE = 'blobs'
 export const SONGS_STORE = 'songs'
 export const TRACKS_STORE = 'tracks'
 
-const DB_VERSION = 2
+/** Per-song annotation strokes (DB v3). Kept separate from the songs record so
+ * potentially large stroke JSON doesn't bloat every song read. Keyed by songId. */
+export const ANNOTATIONS_STORE = 'annotations'
+
+const DB_VERSION = 3
 
 /**
  * Open (and migrate) the shared practice IndexedDB. All library stores live in
@@ -32,6 +36,10 @@ export const openDb = () =>
       if (!db.objectStoreNames.contains(TRACKS_STORE)) {
         const tracks = db.createObjectStore(TRACKS_STORE, { keyPath: 'id' })
         tracks.createIndex('bySong', 'songId', { unique: false })
+      }
+      if (!db.objectStoreNames.contains(ANNOTATIONS_STORE)) {
+        // Keyed by songId (the put/get key), like BLOBS_STORE.
+        db.createObjectStore(ANNOTATIONS_STORE)
       }
     }
     request.onsuccess = () => resolve(request.result)
