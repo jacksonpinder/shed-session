@@ -46,6 +46,10 @@ const TOOLS: { tool: AnnotationTool; label: string; Icon: typeof Pencil }[] = [
 // the thickest sample fills the swatch without clipping.
 const MAX_WIDTH = Math.max(...HIGHLIGHT_WIDTHS)
 
+// Pixel height the thickest width sample renders at inside its swatch; thinner
+// samples scale down proportionally from this.
+const MAX_PREVIEW_PX = 18
+
 export default function AnnotationToolbar() {
   const {
     writeMode,
@@ -100,16 +104,22 @@ export default function AnnotationToolbar() {
   return (
     <div
       // The fixed/translate transition lives here; the inner card carries the
-      // visual chrome. `aria-hidden` + `pointer-events` keep it inert offscreen.
-      aria-hidden={!writeMode}
+      // visual chrome. `inert` (React 19) pulls the whole subtree out of tab
+      // order + the a11y tree and blocks pointer events while off-screen — so we
+      // don't need a separate aria-hidden/pointer-events-none, and we avoid the
+      // aria-hidden-over-focusable-content ARIA violation.
+      inert={!writeMode}
       className={`fixed left-0 top-1/2 z-50 -translate-y-1/2 transition-transform duration-300 ease-out ${
         writeMode ? 'translate-x-0' : '-translate-x-[120%]'
-      } ${writeMode ? 'pointer-events-auto' : 'pointer-events-none'}`}
+      }`}
     >
       <div
         // Compact tier (`max-height: 500px`) tightens every gap/padding via the
         // arbitrary-variant utilities below. overflow-hidden guarantees the
-        // toolbar compresses rather than scrolls.
+        // toolbar compresses rather than scrolls. Full tier holds the 44px ideal
+        // touch target; the compact tier targets AA-compliant >=40px instead,
+        // because a 7-section vertical toolbar can't fit seven 44px rows in a
+        // landscape-phone viewport.
         role="toolbar"
         aria-label="Annotation tools"
         aria-orientation="vertical"
@@ -152,13 +162,13 @@ export default function AnnotationToolbar() {
                 aria-label={`${name} color`}
                 aria-pressed={selected}
                 title={name}
-                // 44px tap target wrapping a smaller visible circle.
-                className="flex h-11 w-11 items-center justify-center rounded-full transition hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#4F7F7A]/40 [@media(max-height:500px)]:h-8 [@media(max-height:500px)]:w-8"
+                // 44px tap target (compact: >=40px) wrapping a smaller visible circle.
+                className="flex h-11 w-11 items-center justify-center rounded-full transition hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#4F7F7A]/40 [@media(max-height:500px)]:h-10 [@media(max-height:500px)]:w-10"
               >
                 <span
-                  className={`block h-6 w-6 rounded-full border border-slate-300 transition [@media(max-height:500px)]:h-5 [@media(max-height:500px)]:w-5 ${
-                    selected ? 'ring-2 ring-offset-2' : ''
-                  }`}
+                  // Selected ring comes from the inline boxShadow below (Tailwind's
+                  // `ring` is itself a box-shadow and would just be clobbered).
+                  className="block h-6 w-6 rounded-full border border-slate-300 transition [@media(max-height:500px)]:h-5 [@media(max-height:500px)]:w-5"
                   style={{
                     backgroundColor: value,
                     boxShadow: selected ? `0 0 0 2px ${ACCENT}` : undefined,
@@ -173,15 +183,17 @@ export default function AnnotationToolbar() {
 
         {/* 3 ── Width swatches (greyed + inert when erasing) ───────────────── */}
         <div
+          // No aria-hidden here: the buttons are already `disabled`, which removes
+          // them from the a11y tree and tab order without the aria-hidden-over-
+          // focusable risk.
           className={`flex flex-col items-center gap-1 transition-opacity [@media(max-height:500px)]:gap-0.5 ${
             isEraser ? 'pointer-events-none opacity-30' : ''
           }`}
-          aria-hidden={isEraser}
         >
           {widths.map((w) => {
             const selected = !isEraser && activeWidth === w
             // Preview stroke height scaled to the swatch; clamped to a visible min.
-            const lineH = Math.max(1, Math.round((w / MAX_WIDTH) * 18))
+            const lineH = Math.max(1, Math.round((w / MAX_WIDTH) * MAX_PREVIEW_PX))
             return (
               <button
                 key={w}
@@ -190,7 +202,7 @@ export default function AnnotationToolbar() {
                 aria-label={`Stroke width ${w}`}
                 aria-pressed={selected}
                 disabled={isEraser}
-                className={`flex h-11 w-11 items-center justify-center rounded-lg border transition hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#4F7F7A]/40 [@media(max-height:500px)]:h-8 [@media(max-height:500px)]:w-11 ${
+                className={`flex h-11 w-11 items-center justify-center rounded-lg border transition hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#4F7F7A]/40 [@media(max-height:500px)]:h-10 [@media(max-height:500px)]:w-11 ${
                   selected ? 'border-transparent' : 'border-slate-200'
                 }`}
                 style={selected ? { boxShadow: `0 0 0 2px ${ACCENT}` } : undefined}
@@ -214,7 +226,7 @@ export default function AnnotationToolbar() {
             disabled={!canUndo}
             aria-label="Undo"
             title="Undo"
-            className={`${baseButton} h-11 w-11 [@media(max-height:500px)]:h-9 [@media(max-height:500px)]:w-11`}
+            className={`${baseButton} h-11 w-11 [@media(max-height:500px)]:h-10 [@media(max-height:500px)]:w-11`}
           >
             <Undo2 size={18} />
           </button>
@@ -224,7 +236,7 @@ export default function AnnotationToolbar() {
             disabled={!canRedo}
             aria-label="Redo"
             title="Redo"
-            className={`${baseButton} h-11 w-11 [@media(max-height:500px)]:h-9 [@media(max-height:500px)]:w-11`}
+            className={`${baseButton} h-11 w-11 [@media(max-height:500px)]:h-10 [@media(max-height:500px)]:w-11`}
           >
             <Redo2 size={18} />
           </button>
@@ -246,7 +258,7 @@ export default function AnnotationToolbar() {
                   setConfirmingClear(false)
                 }}
                 aria-label="Confirm clear all"
-                className="flex h-11 w-11 items-center justify-center rounded-full border border-transparent text-white shadow transition hover:shadow-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#4F7F7A]/40 [@media(max-height:500px)]:h-9 [@media(max-height:500px)]:w-9"
+                className="flex h-11 w-11 items-center justify-center rounded-full border border-transparent text-white shadow transition hover:shadow-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#4F7F7A]/40 [@media(max-height:500px)]:h-10 [@media(max-height:500px)]:w-10"
                 style={{ backgroundColor: '#ef4444' }}
               >
                 <Check size={18} />
@@ -255,7 +267,7 @@ export default function AnnotationToolbar() {
                 type="button"
                 onClick={() => setConfirmingClear(false)}
                 aria-label="Cancel clear all"
-                className={`${baseButton} h-11 w-11 [@media(max-height:500px)]:h-9 [@media(max-height:500px)]:w-9`}
+                className={`${baseButton} h-11 w-11 [@media(max-height:500px)]:h-10 [@media(max-height:500px)]:w-10`}
               >
                 <span className="text-sm font-medium">No</span>
               </button>
@@ -267,7 +279,7 @@ export default function AnnotationToolbar() {
             onClick={() => setConfirmingClear(true)}
             aria-label="Clear all annotations"
             title="Clear all"
-            className={`${baseButton} h-11 w-11 [@media(max-height:500px)]:h-9 [@media(max-height:500px)]:w-11`}
+            className={`${baseButton} h-11 w-11 [@media(max-height:500px)]:h-10 [@media(max-height:500px)]:w-11`}
           >
             <Trash2 size={18} />
           </button>
