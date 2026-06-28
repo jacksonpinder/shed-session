@@ -67,6 +67,10 @@ function cursorForTool(tool: 'pen' | 'highlight' | 'eraser'): string {
       return HIGHLIGHT_CURSOR
     case 'eraser':
       return ERASER_CURSOR
+    default:
+      // A future tool that forgets to add a cursor falls back to crosshair
+      // rather than returning undefined at runtime.
+      return 'crosshair'
   }
 }
 
@@ -162,6 +166,11 @@ export default function AnnotationCanvas(props: AnnotationCanvasProps) {
   }
 
   // ── Sizing: match the page wrapper's CSS box, backed at dpr ─────────────────────
+  // `devicePixelRatio` is read from the render-time prop and is a dependency below,
+  // so this effect re-runs only when React re-renders with a new value — it does NOT
+  // observe a mid-session monitor-DPR change (e.g. dragging the window to a display
+  // with a different scale factor). That matches react-pdf's `<Page devicePixelRatio>`
+  // limitation; strokes re-crisp on the next state-driven render. Acceptable for now.
   useLayoutEffect(() => {
     const canvas = canvasRef.current
     if (!canvas) return
@@ -359,15 +368,22 @@ export default function AnnotationCanvas(props: AnnotationCanvasProps) {
       if (pointersRef.current.size < 2) {
         gestureRef.current.active = false
       }
-      return
-    }
-
-    // Drawing / erasing pointer lifted.
-    if (c.activeTool === 'eraser') {
+    } else if (c.activeTool === 'eraser') {
+      // Erasing pointer lifted.
       eraserPointRef.current = null
       scheduleRedraw()
     } else if (liveStrokeRef.current) {
+      // Drawing pointer lifted.
       finalizeStroke()
+    }
+
+    // Belt-and-suspenders: once no pointers remain, force every interaction flag
+    // back to rest so no path can leave the component stuck mid-gesture/-stroke.
+    if (pointersRef.current.size === 0) {
+      gestureRef.current.active = false
+      liveStrokeRef.current = null
+      eraserPointRef.current = null
+      scheduleRedraw()
     }
   }
 
