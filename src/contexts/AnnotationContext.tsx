@@ -129,7 +129,7 @@ function annotationsReducer(state: ReducerState, action: ReducerAction): Reducer
     case 'addStroke': {
       const annotations = withStroke(state.annotations, action.page, action.stroke)
       const cmd: AnnotationCommand = { type: 'add', page: action.page, stroke: action.stroke }
-      return { annotations, undoStack: [...state.undoStack, cmd], redoStack: [] }
+      return { annotations, undoStack: [...state.undoStack, cmd].slice(-100), redoStack: [] }
     }
 
     case 'removeStroke': {
@@ -137,12 +137,12 @@ function annotationsReducer(state: ReducerState, action: ReducerAction): Reducer
       if (!stroke) return state // nothing to remove — leave state untouched
       const annotations = withoutStroke(state.annotations, action.page, action.strokeId)
       const cmd: AnnotationCommand = { type: 'remove', page: action.page, stroke }
-      return { annotations, undoStack: [...state.undoStack, cmd], redoStack: [] }
+      return { annotations, undoStack: [...state.undoStack, cmd].slice(-100), redoStack: [] }
     }
 
     case 'clearAll': {
       const cmd: AnnotationCommand = { type: 'clearAll', snapshot: state.annotations }
-      return { annotations: {}, undoStack: [...state.undoStack, cmd], redoStack: [] }
+      return { annotations: {}, undoStack: [...state.undoStack, cmd].slice(-100), redoStack: [] }
     }
 
     case 'undo': {
@@ -239,8 +239,8 @@ export function AnnotationProvider({
   const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const skipNextSave = useRef(true)
 
-  // The next annotations value after a song change is its loaded snapshot — never
-  // re-save it. Re-arm the skip guard whenever the song changes.
+  // Skip the first annotations evaluation after a songId change — it reflects the
+  // prior song's data re-evaluated under the new songId, not a user mutation.
   useEffect(() => {
     skipNextSave.current = true
   }, [songId])
@@ -262,6 +262,15 @@ export function AnnotationProvider({
       if (saveTimer.current) clearTimeout(saveTimer.current)
     }
   }, [state.annotations, songId])
+
+  // ── Unmount cleanup ───────────────────────────────────────────────────────────
+  // If the provider unmounts while a debounce timer is still in flight, cancel it
+  // so `saveAnnotations` doesn't fire against an unmounted component's stale closure.
+  useEffect(() => {
+    return () => {
+      if (saveTimer.current) clearTimeout(saveTimer.current)
+    }
+  }, [])
 
   // ── Stable callbacks ──────────────────────────────────────────────────────────
   const addStroke = useCallback((page: number, stroke: AnnotationStroke) => {
