@@ -338,6 +338,8 @@ export const duplicateSong = async (id: string): Promise<Song | null> => {
       analysis: t.analysis,
     })
   }
+  const srcAnnotations = await loadAnnotations(id)
+  if (srcAnnotations) await saveAnnotations(copy.id, srcAnnotations)
   return getSong(copy.id)
 }
 
