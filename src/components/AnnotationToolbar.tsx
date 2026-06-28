@@ -1,15 +1,4 @@
-/**
- * AnnotationToolbar — vertical tool palette that slides in from the left edge
- * while write mode is active. Pure UI: every action reads from / writes to
- * `AnnotationContext` via `useAnnotations()`. No props, no local annotation
- * state beyond the inline "clear all" confirmation toggle.
- *
- * Layout (top → bottom): tool selector · color swatches · width swatches ·
- * undo/redo · clear · Done. Two CSS tiers — full on tall viewports, compact
- * under `max-height: 500px` — so everything fits without the toolbar scrolling.
- */
-
-import { useState } from 'react'
+import { useState, useRef, useEffect } from 'react'
 import {
   Pencil,
   Highlighter,
@@ -18,10 +7,9 @@ import {
   Redo2,
   Trash2,
   Check,
+  ChevronDown,
 } from 'lucide-react'
 import { useAnnotations, type AnnotationTool } from '../contexts/AnnotationContext'
-
-// ── Palette ───────────────────────────────────────────────────────────────────
 
 const ACCENT = '#4F7F7A'
 
@@ -42,13 +30,30 @@ const TOOLS: { tool: AnnotationTool; label: string; Icon: typeof Pencil }[] = [
   { tool: 'eraser', label: 'Eraser', Icon: Eraser },
 ]
 
-// Largest pen/highlight width, used to scale the width-swatch preview lines so
-// the thickest sample fills the swatch without clipping.
-const MAX_WIDTH = Math.max(...HIGHLIGHT_WIDTHS)
-
-// Pixel height the thickest width sample renders at inside its swatch; thinner
-// samples scale down proportionally from this.
-const MAX_PREVIEW_PX = 18
+// Squiggly SVG line preview — looks like a real brushstroke rather than a flat bar.
+function WidthLine({
+  width,
+  maxWidth,
+  svgW = 36,
+  svgH = 14,
+  color = 'currentColor',
+}: {
+  width: number
+  maxWidth: number
+  svgW?: number
+  svgH?: number
+  color?: string
+}) {
+  const sw = Math.max(0.8, (width / maxWidth) * 7)
+  // S-curve path scaled to the SVG viewport
+  const hw = svgW / 2
+  const d = `M2 ${svgH * 0.72} C${svgW * 0.22} ${svgH * 0.18} ${svgW * 0.42} ${svgH * 0.9} ${hw} ${svgH * 0.5} C${svgW * 0.6} ${svgH * 0.1} ${svgW * 0.8} ${svgH * 0.74} ${svgW - 2} ${svgH * 0.38}`
+  return (
+    <svg width={svgW} height={svgH} viewBox={`0 0 ${svgW} ${svgH}`} fill="none">
+      <path d={d} stroke={color} strokeWidth={sw} strokeLinecap="round" fill="none" />
+    </svg>
+  )
+}
 
 export default function AnnotationToolbar() {
   const {
@@ -72,206 +77,241 @@ export default function AnnotationToolbar() {
   } = useAnnotations()
 
   const [confirmingClear, setConfirmingClear] = useState(false)
+  const [openPanel, setOpenPanel] = useState<null | 'color' | 'width'>(null)
+
+  const colorRef = useRef<HTMLDivElement>(null)
+  const widthRef = useRef<HTMLDivElement>(null)
 
   const isEraser = activeTool === 'eraser'
   const isHighlight = activeTool === 'highlight'
-
-  // Active color/width for the tool currently selected (eraser has neither).
   const activeColor = isHighlight ? highlightColor : penColor
   const activeWidth = isHighlight ? highlightWidth : penWidth
   const widths = isHighlight ? HIGHLIGHT_WIDTHS : PEN_WIDTHS
+  const maxWidth = isHighlight ? HIGHLIGHT_WIDTHS[HIGHLIGHT_WIDTHS.length - 1] : PEN_WIDTHS[PEN_WIDTHS.length - 1]
 
-  // Picking a color while erasing implies "I want to draw" — switch to pen first.
+  // Close open panel when clicking outside both chip refs
+  useEffect(() => {
+    if (!openPanel) return
+    const handler = (e: MouseEvent) => {
+      if (
+        !colorRef.current?.contains(e.target as Node) &&
+        !widthRef.current?.contains(e.target as Node)
+      ) {
+        setOpenPanel(null)
+      }
+    }
+    document.addEventListener('mousedown', handler)
+    return () => document.removeEventListener('mousedown', handler)
+  }, [openPanel])
+
+  // Also close panels when write mode exits
+  useEffect(() => {
+    if (!writeMode) setOpenPanel(null)
+  }, [writeMode])
+
   const handleColor = (value: string) => {
     if (isEraser) {
       setActiveTool('pen')
       setPenColor(value)
-      return
+    } else if (isHighlight) {
+      setHighlightColor(value)
+    } else {
+      setPenColor(value)
     }
-    if (isHighlight) setHighlightColor(value)
-    else setPenColor(value)
+    setOpenPanel(null)
   }
 
   const handleWidth = (w: number) => {
     if (isHighlight) setHighlightWidth(w)
     else setPenWidth(w)
+    setOpenPanel(null)
   }
 
-  // ── Shared button styles ──────────────────────────────────────────────────────
-  const baseButton =
-    'flex items-center justify-center rounded-full bg-white text-[#0b1220] shadow border border-slate-200 transition hover:bg-slate-50 hover:shadow-md hover:border-slate-300 active:bg-slate-100 disabled:cursor-not-allowed disabled:opacity-40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#4F7F7A]/40'
+  const baseBtn =
+    'flex items-center justify-center rounded-full border border-slate-200 bg-white text-[#0b1220] shadow-sm transition hover:bg-slate-50 hover:border-slate-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#4F7F7A]/40 disabled:cursor-not-allowed disabled:opacity-40'
 
   return (
+    // Not fixed/absolute — lives in the flex-col flow so it pushes the PDF area down.
+    // `hidden` when write mode is OFF so it takes no space and the popover children
+    // aren't mounted. `inert` keeps it out of tab order + a11y tree during the
+    // brief transition window if we ever add animation back.
     <div
-      // The fixed/translate transition lives here; the inner card carries the
-      // visual chrome. `inert` (React 19) pulls the whole subtree out of tab
-      // order + the a11y tree and blocks pointer events while off-screen — so we
-      // don't need a separate aria-hidden/pointer-events-none, and we avoid the
-      // aria-hidden-over-focusable-content ARIA violation.
       inert={!writeMode}
-      className={`fixed left-0 top-1/2 z-50 -translate-y-1/2 transition-transform duration-300 ease-out ${
-        writeMode ? 'translate-x-0' : '-translate-x-[120%]'
-      }`}
+      className={`${writeMode ? 'border-b border-slate-200' : 'hidden'} bg-white/95 backdrop-blur-sm`}
     >
       <div
-        // Compact tier (`max-height: 500px`) tightens every gap/padding via the
-        // arbitrary-variant utilities below. overflow-hidden guarantees the
-        // toolbar compresses rather than scrolls. Full tier holds the 44px ideal
-        // touch target; the compact tier targets AA-compliant >=40px instead,
-        // because a 7-section vertical toolbar can't fit seven 44px rows in a
-        // landscape-phone viewport.
         role="toolbar"
         aria-label="Annotation tools"
-        aria-orientation="vertical"
-        className="flex max-h-[96vh] flex-col items-center gap-3 overflow-hidden rounded-r-2xl border border-l-0 border-slate-200 bg-white px-2 py-3 shadow-xl [@media(max-height:500px)]:gap-1.5 [@media(max-height:500px)]:py-1.5"
+        aria-orientation="horizontal"
+        className="flex h-11 items-center gap-1 px-3"
       >
-        {/* 1 ── Tool selector ─────────────────────────────────────────────── */}
-        <div className="flex flex-col items-center gap-1.5 [@media(max-height:500px)]:gap-1">
-          {TOOLS.map(({ tool, label, Icon }) => {
-            const active = activeTool === tool
-            return (
-              <button
-                key={tool}
-                type="button"
-                onClick={() => setActiveTool(tool)}
-                aria-label={label}
-                aria-pressed={active}
-                title={label}
-                className={`${baseButton} h-11 w-11 [@media(max-height:500px)]:h-10 [@media(max-height:500px)]:w-10 ${
-                  active ? 'border-transparent text-white shadow-md' : ''
-                }`}
-                style={active ? { backgroundColor: ACCENT } : undefined}
-              >
-                <Icon size={18} />
-              </button>
-            )
-          })}
-        </div>
+        {/* ── Tools ──────────────────────────────────────────────────────── */}
+        {TOOLS.map(({ tool, label, Icon }) => {
+          const active = activeTool === tool
+          return (
+            <button
+              key={tool}
+              type="button"
+              onClick={() => setActiveTool(tool)}
+              aria-label={label}
+              aria-pressed={active}
+              title={label}
+              className={`${baseBtn} h-8 w-8 ${active ? 'border-transparent text-white' : ''}`}
+              style={active ? { backgroundColor: ACCENT } : undefined}
+            >
+              <Icon size={15} />
+            </button>
+          )
+        })}
 
-        <div className="h-px w-7 shrink-0 bg-slate-200" />
+        <div className="mx-0.5 h-5 w-px shrink-0 bg-slate-200" />
 
-        {/* 2 ── Color swatches ────────────────────────────────────────────── */}
-        <div className="flex flex-col items-center gap-1 [@media(max-height:500px)]:gap-0.5">
-          {COLORS.map(({ name, value }) => {
-            const selected = !isEraser && activeColor.toLowerCase() === value.toLowerCase()
-            return (
-              <button
-                key={value}
-                type="button"
-                onClick={() => handleColor(value)}
-                aria-label={`${name} color`}
-                aria-pressed={selected}
-                title={name}
-                // 44px tap target (compact: >=40px) wrapping a smaller visible circle.
-                className="flex h-11 w-11 items-center justify-center rounded-full transition hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#4F7F7A]/40 [@media(max-height:500px)]:h-10 [@media(max-height:500px)]:w-10"
-              >
-                <span
-                  // Selected ring comes from the inline boxShadow below (Tailwind's
-                  // `ring` is itself a box-shadow and would just be clobbered).
-                  className="block h-6 w-6 rounded-full border border-slate-300 transition [@media(max-height:500px)]:h-5 [@media(max-height:500px)]:w-5"
-                  style={{
-                    backgroundColor: value,
-                    boxShadow: selected ? `0 0 0 2px ${ACCENT}` : undefined,
-                  }}
-                />
-              </button>
-            )
-          })}
-        </div>
-
-        <div className="h-px w-7 shrink-0 bg-slate-200" />
-
-        {/* 3 ── Width swatches (greyed + inert when erasing) ───────────────── */}
-        <div
-          // No aria-hidden here: the buttons are already `disabled`, which removes
-          // them from the a11y tree and tab order without the aria-hidden-over-
-          // focusable risk.
-          className={`flex flex-col items-center gap-1 transition-opacity [@media(max-height:500px)]:gap-0.5 ${
-            isEraser ? 'pointer-events-none opacity-30' : ''
-          }`}
-        >
-          {widths.map((w) => {
-            const selected = !isEraser && activeWidth === w
-            // Preview stroke height scaled to the swatch; clamped to a visible min.
-            const lineH = Math.max(1, Math.round((w / MAX_WIDTH) * MAX_PREVIEW_PX))
-            return (
-              <button
-                key={w}
-                type="button"
-                onClick={() => handleWidth(w)}
-                aria-label={`Stroke width ${w}`}
-                aria-pressed={selected}
-                disabled={isEraser}
-                className={`flex h-11 w-11 items-center justify-center rounded-lg border transition hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#4F7F7A]/40 [@media(max-height:500px)]:h-10 [@media(max-height:500px)]:w-11 ${
-                  selected ? 'border-transparent' : 'border-slate-200'
-                }`}
-                style={selected ? { boxShadow: `0 0 0 2px ${ACCENT}` } : undefined}
-              >
-                <span
-                  className="block w-7 rounded-full bg-[#0b1220]"
-                  style={{ height: `${lineH}px` }}
-                />
-              </button>
-            )
-          })}
-        </div>
-
-        <div className="h-px w-7 shrink-0 bg-slate-200" />
-
-        {/* 4 ── Undo / Redo ───────────────────────────────────────────────── */}
-        <div className="flex flex-col items-center gap-1.5 [@media(max-height:500px)]:gap-1">
+        {/* ── Color chip + popover ────────────────────────────────────────── */}
+        <div ref={colorRef} className="relative">
           <button
             type="button"
-            onClick={undo}
-            disabled={!canUndo}
-            aria-label="Undo"
-            title="Undo"
-            className={`${baseButton} h-11 w-11 [@media(max-height:500px)]:h-10 [@media(max-height:500px)]:w-11`}
+            onClick={() => setOpenPanel(openPanel === 'color' ? null : 'color')}
+            aria-label="Color"
+            aria-expanded={openPanel === 'color'}
+            title="Color"
+            className="flex h-8 items-center gap-1 rounded-full border border-slate-200 bg-white px-2 shadow-sm transition hover:border-slate-300 hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#4F7F7A]/40"
           >
-            <Undo2 size={18} />
+            <span
+              className="block h-4 w-4 rounded-full border border-slate-200/60"
+              style={{
+                backgroundColor: isEraser ? '#94a3b8' : activeColor,
+                boxShadow: openPanel === 'color' ? `0 0 0 2px ${ACCENT}` : undefined,
+              }}
+            />
+            <ChevronDown size={11} className="text-slate-400" />
           </button>
-          <button
-            type="button"
-            onClick={redo}
-            disabled={!canRedo}
-            aria-label="Redo"
-            title="Redo"
-            className={`${baseButton} h-11 w-11 [@media(max-height:500px)]:h-10 [@media(max-height:500px)]:w-11`}
-          >
-            <Redo2 size={18} />
-          </button>
-        </div>
 
-        <div className="h-px w-7 shrink-0 bg-slate-200" />
-
-        {/* 5 ── Clear all (inline confirmation, no browser dialog) ─────────── */}
-        {confirmingClear ? (
-          <div className="flex flex-col items-center gap-1">
-            <span className="px-1 text-center text-[10px] font-medium leading-tight text-[#0b1220]">
-              Clear all?
-            </span>
-            <div className="flex gap-1">
-              <button
-                type="button"
-                onClick={() => {
-                  clearAll()
-                  setConfirmingClear(false)
-                }}
-                aria-label="Confirm clear all"
-                className="flex h-11 w-11 items-center justify-center rounded-full border border-transparent text-white shadow transition hover:shadow-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#4F7F7A]/40 [@media(max-height:500px)]:h-10 [@media(max-height:500px)]:w-10"
-                style={{ backgroundColor: '#ef4444' }}
-              >
-                <Check size={18} />
-              </button>
-              <button
-                type="button"
-                onClick={() => setConfirmingClear(false)}
-                aria-label="Cancel clear all"
-                className={`${baseButton} h-11 w-11 [@media(max-height:500px)]:h-10 [@media(max-height:500px)]:w-10`}
-              >
-                <span className="text-sm font-medium">No</span>
-              </button>
+          {openPanel === 'color' && (
+            <div className="absolute left-0 top-full z-[55] mt-1 flex gap-1 rounded-xl border border-slate-200 bg-white p-2 shadow-lg">
+              {COLORS.map(({ name, value }) => {
+                const selected = !isEraser && activeColor.toLowerCase() === value.toLowerCase()
+                return (
+                  <button
+                    key={value}
+                    type="button"
+                    onClick={() => handleColor(value)}
+                    aria-label={name}
+                    aria-pressed={selected}
+                    className="flex h-8 w-8 items-center justify-center rounded-full transition hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#4F7F7A]/40"
+                  >
+                    <span
+                      className="block h-5 w-5 rounded-full border border-slate-300/50 transition"
+                      style={{
+                        backgroundColor: value,
+                        boxShadow: selected
+                          ? `0 0 0 2px white, 0 0 0 3.5px ${ACCENT}`
+                          : undefined,
+                      }}
+                    />
+                  </button>
+                )
+              })}
             </div>
+          )}
+        </div>
+
+        {/* ── Width chip + popover ────────────────────────────────────────── */}
+        <div ref={widthRef} className="relative">
+          <button
+            type="button"
+            onClick={() => !isEraser && setOpenPanel(openPanel === 'width' ? null : 'width')}
+            aria-label="Stroke width"
+            aria-expanded={!isEraser && openPanel === 'width'}
+            disabled={isEraser}
+            title="Stroke width"
+            className={`flex h-8 items-center gap-1 rounded-full border bg-white px-2 shadow-sm transition hover:border-slate-300 hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#4F7F7A]/40 disabled:cursor-not-allowed disabled:opacity-40 ${
+              openPanel === 'width' ? 'border-[#4F7F7A]' : 'border-slate-200'
+            }`}
+          >
+            <WidthLine
+              width={isEraser ? PEN_WIDTHS[2] : activeWidth}
+              maxWidth={maxWidth}
+              color={isEraser ? '#94a3b8' : '#0b1220'}
+            />
+            <ChevronDown size={11} className="text-slate-400" />
+          </button>
+
+          {openPanel === 'width' && !isEraser && (
+            <div className="absolute left-0 top-full z-[55] mt-1 flex flex-col gap-0.5 rounded-xl border border-slate-200 bg-white p-2 shadow-lg">
+              {widths.map((w) => {
+                const selected = activeWidth === w
+                return (
+                  <button
+                    key={w}
+                    type="button"
+                    onClick={() => handleWidth(w)}
+                    aria-label={`Width ${w}`}
+                    aria-pressed={selected}
+                    className="flex h-8 w-full items-center justify-center rounded-lg px-2 transition hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#4F7F7A]/40"
+                    style={
+                      selected
+                        ? { backgroundColor: '#f0f9f8', boxShadow: `inset 0 0 0 1.5px ${ACCENT}` }
+                        : undefined
+                    }
+                  >
+                    <WidthLine width={w} maxWidth={widths[widths.length - 1]} svgW={56} svgH={16} />
+                  </button>
+                )
+              })}
+            </div>
+          )}
+        </div>
+
+        <div className="mx-0.5 h-5 w-px shrink-0 bg-slate-200" />
+
+        {/* ── Undo / Redo ─────────────────────────────────────────────────── */}
+        <button
+          type="button"
+          onClick={undo}
+          disabled={!canUndo}
+          aria-label="Undo"
+          title="Undo"
+          className={`${baseBtn} h-8 w-8`}
+        >
+          <Undo2 size={14} />
+        </button>
+        <button
+          type="button"
+          onClick={redo}
+          disabled={!canRedo}
+          aria-label="Redo"
+          title="Redo"
+          className={`${baseBtn} h-8 w-8`}
+        >
+          <Redo2 size={14} />
+        </button>
+
+        <div className="mx-0.5 h-5 w-px shrink-0 bg-slate-200" />
+
+        {/* ── Clear all ───────────────────────────────────────────────────── */}
+        {confirmingClear ? (
+          <div className="flex items-center gap-1">
+            <span className="whitespace-nowrap text-xs text-[#0b1220]">Clear all?</span>
+            <button
+              type="button"
+              onClick={() => {
+                clearAll()
+                setConfirmingClear(false)
+              }}
+              aria-label="Confirm clear all"
+              className="flex h-8 w-8 items-center justify-center rounded-full border border-transparent text-white shadow-sm transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-400/40"
+              style={{ backgroundColor: '#ef4444' }}
+            >
+              <Check size={14} />
+            </button>
+            <button
+              type="button"
+              onClick={() => setConfirmingClear(false)}
+              aria-label="Cancel"
+              className={`${baseBtn} h-8 px-2 text-xs font-medium`}
+            >
+              No
+            </button>
           </div>
         ) : (
           <button
@@ -279,27 +319,26 @@ export default function AnnotationToolbar() {
             onClick={() => setConfirmingClear(true)}
             aria-label="Clear all annotations"
             title="Clear all"
-            className={`${baseButton} h-11 w-11 [@media(max-height:500px)]:h-10 [@media(max-height:500px)]:w-11`}
+            className={`${baseBtn} h-8 w-8`}
           >
-            <Trash2 size={18} />
+            <Trash2 size={14} />
           </button>
         )}
 
-        <div className="h-px w-7 shrink-0 bg-slate-200" />
+        {/* ── Spacer ──────────────────────────────────────────────────────── */}
+        <div className="flex-1" />
 
-        {/* 6 ── Done — primary exit from write mode ───────────────────────── */}
+        {/* ── Done ────────────────────────────────────────────────────────── */}
         <button
           type="button"
           onClick={() => setWriteMode(false)}
           aria-label="Done annotating"
           title="Done"
-          className="flex h-12 w-11 flex-col items-center justify-center gap-0.5 rounded-2xl border border-transparent text-white shadow-md transition hover:shadow-lg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#4F7F7A]/60 [@media(max-height:500px)]:h-10 [@media(max-height:500px)]:w-11"
+          className="flex h-8 items-center gap-1.5 rounded-full border border-transparent px-3 text-sm font-semibold text-white shadow-sm transition hover:brightness-105 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#4F7F7A]/60"
           style={{ backgroundColor: ACCENT }}
         >
-          <Check size={20} />
-          <span className="text-[10px] font-semibold leading-none [@media(max-height:500px)]:hidden">
-            Done
-          </span>
+          <Check size={14} />
+          Done
         </button>
       </div>
     </div>

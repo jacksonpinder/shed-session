@@ -50,14 +50,29 @@ const PINCH_OUT_RATIO = 1.18
 // Eraser radius in CSS px (converted to normalized space per-page at use).
 const ERASER_PX = 14
 
-// ── Tool cursors (tiny inline SVG data-URIs) ───────────────────────────────────
-// Hotspot coordinates are chosen so the "tip" of each tool sits at the pointer.
-const PEN_CURSOR =
-  "url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24' fill='none' stroke='%23334155' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M12 19l7-7 3 3-7 7-3-3z'/%3E%3Cpath d='M18 13l-1.5-7.5L2 2l3.5 14.5L13 18l5-5z'/%3E%3Cpath d='M2 2l7.586 7.586'/%3E%3Ccircle cx='11' cy='11' r='2'/%3E%3C/svg%3E\") 2 22, crosshair"
-const HIGHLIGHT_CURSOR =
-  "url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24' fill='none' stroke='%23ca8a04' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M9 11l-6 6v3h9l3-3'/%3E%3Cpath d='M22 12l-4.6 4.6a2 2 0 0 1-2.8 0l-3.2-3.2a2 2 0 0 1 0-2.8L16 6'/%3E%3C/svg%3E\") 3 21, crosshair"
-const ERASER_CURSOR =
-  "url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24' fill='none' stroke='%23475569' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M20 20H7L3 16a1.5 1.5 0 0 1 0-2L13 4a1.5 1.5 0 0 1 2 0l6 6a1.5 1.5 0 0 1 0 2l-8 8'/%3E%3Cpath d='M6 11l7 7'/%3E%3C/svg%3E\") 12 12, crosshair"
+// ── Tool cursors: exact lucide icon SVGs as CSS cursor data-URIs ──────────────
+// Paths are taken verbatim from lucide-react's bundled icon nodes so the cursor
+// matches the toolbar icon pixel-for-pixel. Hotspots sit at each tool's drawing tip.
+const _cur = (body: string, hx: number, hy: number) => {
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#1e293b" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">${body}</svg>`
+  return `url("data:image/svg+xml,${encodeURIComponent(svg)}") ${hx} ${hy}, crosshair`
+}
+
+// lucide Pencil — tip is the bottom-left of the filled body path
+const PEN_CURSOR = _cur(
+  '<path d="M21.174 6.812a1 1 0 0 0-3.986-3.987L3.842 16.174a2 2 0 0 0-.5.83l-1.321 4.352a.5.5 0 0 0 .623.622l4.353-1.32a2 2 0 0 0 .83-.497z"/><path d="m15 5 4 4"/>',
+  2, 21
+)
+// lucide Highlighter — contact point is the lower-left corner of the highlighted area
+const HIGHLIGHT_CURSOR = _cur(
+  '<path d="m9 11-6 6v3h9l3-3"/><path d="m22 12-4.6 4.6a2 2 0 0 1-2.8 0l-5.2-5.2a2 2 0 0 1 0-2.8L14 4"/>',
+  3, 20
+)
+// lucide Eraser — active erasing corner is bottom-left of the block
+const ERASER_CURSOR = _cur(
+  '<path d="M21 21H8a2 2 0 0 1-1.42-.587l-3.994-3.999a2 2 0 0 1 0-2.828l10-10a2 2 0 0 1 2.829 0l5.999 6a2 2 0 0 1 0 2.828L12.834 21"/><path d="m5.082 11.09 8.828 8.828"/>',
+  5, 14
+)
 
 function cursorForTool(tool: 'pen' | 'highlight' | 'eraser'): string {
   switch (tool) {
@@ -203,7 +218,13 @@ export default function AnnotationCanvas(props: AnnotationCanvasProps) {
   }, [effectiveScale, devicePixelRatio])
 
   // ── Redraw when committed annotations or scale change ───────────────────────────
+  // Cancel any pending rAF before scheduling a fresh one so the new annotations are
+  // always read by the redraw that fires — not a stale rAF queued before this render.
   useEffect(() => {
+    if (rafRef.current != null) {
+      cancelAnimationFrame(rafRef.current)
+      rafRef.current = null
+    }
     scheduleRedraw()
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [ctx?.annotations, page, effectiveScale])

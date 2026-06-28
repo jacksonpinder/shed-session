@@ -519,26 +519,31 @@ export default function SongView({ songId, onBack }: SongViewProps) {
 }
 
 /**
- * Always-visible floating pencil that toggles annotation write mode.
+ * Floating pencil button that enters annotation write mode.
  *
- * Lives below `SongView` so it sits *inside* `<AnnotationProvider>` and can call
- * `useAnnotations()` (SongView itself renders the provider and is therefore above
- * the context). Positioned top-right under ContextBar's zoom cluster at z-40 —
- * above the PDF/ContextBar (z-30), below the slide-in toolbar (z-50) — so it never
- * overlaps the back button, zoom controls, or the open toolbar.
+ * Hidden when write mode is ON — the horizontal toolbar's Done button handles exit
+ * so there are never two simultaneous exit mechanisms competing for space.
+ *
+ * Positioning: desktop (non-touch, ≥1024px) places it below the zoom cluster at
+ * top-14; mobile/touch places it at top-2 alongside the back button row since the
+ * zoom buttons are hidden on those devices.
  */
 function WriteModeToggle() {
   const { writeMode, setWriteMode } = useAnnotations()
 
-  const handleToggle = () => {
-    const next = !writeMode
-    // Mode entry must always succeed — toggle before any best-effort hint work.
-    setWriteMode(next)
-    // First entry into write mode on a touch device: hint that two fingers scroll
-    // (one finger now draws). Once per browser session. Storage access can throw
-    // in Safari private mode / when storage is disabled — that must not break the
-    // toggle, so the whole best-effort block is guarded.
-    if (next && typeof window !== 'undefined') {
+  // Match the same breakpoint ContextBar uses to show/hide zoom buttons.
+  const isMobile =
+    typeof window !== 'undefined'
+      ? window.matchMedia('(max-width: 1024px), (pointer: coarse)').matches
+      : false
+
+  // Hidden while in write mode — toolbar's Done button handles exit.
+  if (writeMode) return null
+
+  const handleEnter = () => {
+    setWriteMode(true)
+    // First entry on a touch device: hint that two fingers still scroll.
+    if (typeof window !== 'undefined') {
       try {
         const isTouch = window.matchMedia?.('(pointer: coarse)').matches
         if (isTouch && !sessionStorage.getItem('anno:scrollHintShown')) {
@@ -546,7 +551,7 @@ function WriteModeToggle() {
           sessionStorage.setItem('anno:scrollHintShown', '1')
         }
       } catch {
-        // storage unavailable (private mode) — skip the hint; mode toggle still works
+        // storage unavailable (private mode) — skip hint, entry still works
       }
     }
   }
@@ -554,16 +559,12 @@ function WriteModeToggle() {
   return (
     <button
       type="button"
-      onClick={handleToggle}
-      aria-label={writeMode ? 'Exit annotation mode' : 'Annotate'}
-      aria-pressed={writeMode}
-      title={writeMode ? 'Exit annotation mode' : 'Annotate'}
-      className={`pointer-events-auto fixed right-3 top-14 z-40 flex h-8 w-8 items-center justify-center rounded-full border shadow transition hover:shadow-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#4F7F7A]/40 ${
-        writeMode
-          ? 'border-transparent text-white hover:brightness-105'
-          : 'border-slate-200 bg-white text-[#0b1220] hover:bg-slate-50 hover:border-slate-300 active:bg-slate-100'
+      onClick={handleEnter}
+      aria-label="Annotate"
+      title="Annotate"
+      className={`pointer-events-auto fixed right-3 z-40 flex h-8 w-8 items-center justify-center rounded-full border border-slate-200 bg-white text-[#0b1220] shadow transition hover:bg-slate-50 hover:border-slate-300 hover:shadow-md active:bg-slate-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#4F7F7A]/40 ${
+        isMobile ? 'top-2' : 'top-14'
       }`}
-      style={writeMode ? { backgroundColor: '#4F7F7A' } : undefined}
     >
       <Pencil size={16} />
     </button>
