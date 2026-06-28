@@ -1016,19 +1016,22 @@ export default function PlayerDock(props: PlayerDockProps) {
             }
           }
           const activeLoop = savedLoopsRef.current.find((loop) => loop.id === scheduledId)
-          const sheetLink = activeLoop?.sheetLink
           const loopScrollOnRepeat = activeLoop?.scrollOnRepeat ?? scrollOnRepeatRef.current
-          if (sheetLink && loopScrollOnRepeat && jumpOnEventRef.current) {
+          if (activeLoop && loopScrollOnRepeat && jumpOnEventRef.current) {
             const viewer = pdfViewerRef?.current ?? null
+            // Resolve the position LIVE from the timing model (same as the marker overlay
+            // and scrollToLoopMarker), falling back to any stored link. A loop with no
+            // stored sheetLink would otherwise never scroll on repeat.
+            const pos = resolveLoopSheetPosition(activeLoop.start) ?? activeLoop.sheetLink ?? null
             if (isPdfScrollingRef.current) {
               logSheetRepeat('skip', { reason: 'scrolling', loopId: scheduledId })
-            } else if (viewer) {
-              viewer.scrollToSheetPosition(sheetLink, { behavior: 'smooth' })
-              logSheetRepeat('scroll', { loopId: scheduledId, page: sheetLink.page })
+            } else if (viewer && pos) {
+              viewer.scrollToSheetPosition(pos, { behavior: 'smooth' })
+              logSheetRepeat('scroll', { loopId: scheduledId, page: pos.page })
               showScrollRepeatPrompt()
               fireJumpOnboarding()
             } else {
-              logSheetRepeat('skip', { reason: 'no-viewer', loopId: scheduledId })
+              logSheetRepeat('skip', { reason: viewer ? 'no-pos' : 'no-viewer', loopId: scheduledId })
             }
           }
           startFadeIn(bounds, bounds.extendedStart)
@@ -1781,6 +1784,8 @@ export default function PlayerDock(props: PlayerDockProps) {
         waveSurfer.seekTo(0)
         waveSurfer.play()
         syncTakePlayback(0, true)
+        // Song repeat wraps back to the start → jump the score to the top too.
+        scrollScoreToSongTime(0)
         return
       }
       setIsPlaying(false)
@@ -1962,11 +1967,20 @@ export default function PlayerDock(props: PlayerDockProps) {
         interactionLockRef.current = false
         waveSurferRef.current?.toggleInteraction(true)
       }
-      if (dragSeekRef.current) {
+      const wasDragSeek = dragSeekRef.current
+      if (wasDragSeek) {
         skipFadeUntilTimeRef.current = waveSurferRef.current?.getCurrentTime() ?? null
       }
       dragSeekRef.current = false
       setIsPointerDown(false)
+      // When a loop is active, this custom pointer path handles the seek (and any
+      // deselect-on-click-outside) — WaveSurfer's own click/dragend score-jump is
+      // suppressed. Jump once here on release (covers both a plain click and a
+      // scrub-release) to the final cursor position.
+      if (wasDragSeek) {
+        const ws = waveSurferRef.current
+        if (ws) scrollScoreToSongTime(trackToSongTime(ws.getCurrentTime()))
+      }
     }
 
     const handlePointerCancel = () => {

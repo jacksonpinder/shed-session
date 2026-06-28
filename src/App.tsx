@@ -4,7 +4,7 @@ import Library from './components/Library'
 import SongView from './components/SongView'
 import AddSongModal from './components/AddSongModal'
 import { AnalysisProvider } from './lib/analysisManager'
-import { ensureLibrary } from './lib/migrate'
+import { ensureLibrary, upgradeScrollOnRepeatDefault } from './lib/migrate'
 
 /** Parse the song id out of a `#/song/:id` hash, or null for the library route. */
 function songIdFromHash(): string | null {
@@ -21,11 +21,15 @@ export default function App() {
   // First-run migration: import the legacy single-song assets + state, then route.
   useEffect(() => {
     let cancelled = false
-    void ensureLibrary()
-      .catch(() => null)
-      .then(() => {
-        if (!cancelled) setReady(true)
-      })
+    void (async () => {
+      try {
+        await ensureLibrary()
+        await upgradeScrollOnRepeatDefault()
+      } catch {
+        // Non-fatal: fall through to a ready app even if migration hiccups.
+      }
+      if (!cancelled) setReady(true)
+    })()
     return () => {
       cancelled = true
     }

@@ -66,6 +66,8 @@ _High-priority, well-defined, can be picked up next._
 - **B2** — Match play-progress bar height to the collapsed waveform height. Defer until D-group pill sizing is final. → docs/architecture/ui-system.md
 - **D3 mobile** — Audio settings bottom drawer (speed, transpose, balance, mono) opening from the `AudioLines` button on touch devices. Desktop popover stays. `AudioSlider` already reusable. → features/audio-controls.md
 - ~~**Dead-code cleanup**~~ — ✅ Done (2026-06-26): removed from `TransportBar`: `speedMenuOpen`/`balanceOpen`/`transposeOpen` state + their click-outside effects; dead button refs; `speedLabel`; unused `Headphones`/`useMemo` imports.
+- **Move track icon**- Because the track selector button is distinct in purpose from audio controls, more transformative to the app experience, I want to place it in the same row as the back button, just to its right. It should also get the floating button style.
+- ***floating buttons auto-hide**- the floating buttons (back, track selector) should hide on scroll down, and show again on scroll up. when we implement this, research best practices for this feature (hide on scroll down, show on scroll up. Does stopping scrolling o anything?).
 
 ### Content
 

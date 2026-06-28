@@ -45,7 +45,7 @@ export const DEFAULT_SETTINGS: SongSettings = {
   speed: 1,
   balance: 0,
   mono: false,
-  scrollOnRepeat: false,
+  scrollOnRepeat: true,
   lanesVisible: true,
 }
 

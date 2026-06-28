@@ -21,6 +21,12 @@ const LEGACY_AUDIO_URL = '/sample.mp3'
 // Set once the legacy import has run so an intentionally-emptied library stays empty
 // (we must not re-seed the sample every time the library happens to be empty).
 const MIGRATED_FLAG = 'practice:migrated'
+// Set once the scrollOnRepeat default-fix has run. The per-song default for
+// scrollOnRepeat shipped as `false`, which left loop-repeat score-jump permanently
+// off with no UI to turn it back on. We flip existing songs that still carry that
+// buggy default to `true` exactly once, so a user who later turns it off via the
+// "Turn off scroll on repeat" prompt keeps their choice on subsequent launches.
+const SCROLL_ON_REPEAT_FIX_FLAG = 'practice:scrollOnRepeat-default-on'
 
 const fetchBlob = async (url: string): Promise<Blob | null> => {
   try {
@@ -98,4 +104,22 @@ export async function ensureLibrary(): Promise<string | null> {
 
   saveJson(MIGRATED_FLAG, true)
   return song.id
+}
+
+/**
+ * One-time fix: upgrade existing songs whose `scrollOnRepeat` still holds the old
+ * buggy `false` default to `true`. Flag-guarded so it runs exactly once — a later
+ * intentional "turn off scroll on repeat" is not undone on the next launch. Songs
+ * that never had the field (undefined) already behave as on, so only explicit
+ * `false` is flipped.
+ */
+export async function upgradeScrollOnRepeatDefault(): Promise<void> {
+  if (loadJson<boolean>(SCROLL_ON_REPEAT_FIX_FLAG)) return
+  const songs = await listSongs()
+  await Promise.all(
+    songs
+      .filter((s) => s.settings.scrollOnRepeat === false)
+      .map((s) => updateSong(s.id, { settings: { ...s.settings, scrollOnRepeat: true } }))
+  )
+  saveJson(SCROLL_ON_REPEAT_FIX_FLAG, true)
 }
