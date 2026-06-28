@@ -1,6 +1,7 @@
 import {
   forwardRef,
   useCallback,
+  useContext,
   useEffect,
   useImperativeHandle,
   useMemo,
@@ -12,6 +13,8 @@ import { Document, Page } from 'react-pdf'
 import type { PDFDocumentProxy, PDFPageProxy } from 'pdfjs-dist'
 import { detectSystems, isLikelyScanned, bandForY, type SystemBand } from '../lib/detectSystems'
 import EdgeScrubberRail from './EdgeScrubberRail'
+import AnnotationCanvas from './AnnotationCanvas'
+import { AnnotationContext } from '../contexts/AnnotationContext'
 import { packIntervals } from '../lib/assignLanes'
 
 // Debug: overlay detected system bands on each page. Flip to true to tune.
@@ -325,6 +328,10 @@ const PDFViewer = forwardRef<PDFViewerHandle, PDFViewerProps>(function PDFViewer
   const zoomOutDisabled = !canZoom || zoom <= MIN_ZOOM + 0.001
   const zoomInDisabled = !canZoom || zoom >= MAX_ZOOM - 0.001
   const devicePixelRatio = typeof window !== 'undefined' ? window.devicePixelRatio || 1 : 1
+  // Annotation write mode — read defensively so the viewer still works if no
+  // AnnotationProvider is mounted (context defaults to null).
+  const annoCtx = useContext(AnnotationContext)
+  const writeMode = annoCtx?.writeMode ?? false
   const pages = useMemo(() => Array.from({ length: numPages }, (_, index) => index + 1), [numPages])
   // Page-margin loop bars: a loop becomes a vertical bar spanning its start→end Y
   // on each page it touches (first page: start→bottom, interior: full, last:
@@ -770,7 +777,9 @@ const PDFViewer = forwardRef<PDFViewerHandle, PDFViewerProps>(function PDFViewer
     <section className="relative h-full w-full">
       <div
         ref={containerRef}
-        className="no-scrollbar relative h-full w-full overflow-y-auto overflow-x-hidden touch-pan-y touch-pinch-zoom"
+        className={`no-scrollbar relative h-full w-full overflow-y-auto overflow-x-hidden touch-pan-y touch-pinch-zoom${
+          writeMode ? ' bg-[#faf3e0]' : ''
+        }`}
       >
         {error ? (
           <div className="flex min-h-full items-center justify-center text-sm text-red-600">
@@ -810,6 +819,14 @@ const PDFViewer = forwardRef<PDFViewerHandle, PDFViewerProps>(function PDFViewer
                         onLoadError={handlePageLoadError}
                         onRenderSuccess={() => handlePageRendered(pageNumber)}
                         onRenderError={handlePageRenderError}
+                      />
+                      <AnnotationCanvas
+                        page={pageNumber}
+                        effectiveScale={effectiveScale}
+                        devicePixelRatio={devicePixelRatio}
+                        scrollContainer={containerRef.current}
+                        onRequestZoomIn={handleZoomIn}
+                        onRequestZoomOut={handleZoomOut}
                       />
                       {DEBUG_SYSTEMS &&
                         (systemBands[pageNumber] ?? []).map((band, index) => {

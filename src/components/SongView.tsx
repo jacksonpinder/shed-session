@@ -1,11 +1,14 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { toast } from 'sonner'
+import { Pencil } from 'lucide-react'
 import { getDocument } from 'pdfjs-dist'
 import PDFViewer from './PDFViewer'
 import type { PDFViewerHandle, SheetMarker } from './PDFViewer'
 import PlayerDock from './PlayerDock'
 import ContextBar from './ContextBar'
 import TrackManager from './TrackManager'
+import AnnotationToolbar from './AnnotationToolbar'
+import { AnnotationProvider, useAnnotations } from '../contexts/AnnotationContext'
 import type { Anchor } from '../lib/syncMap'
 import type { BeatAnalysis } from '../lib/transcribe'
 import { generateSyncMap } from '../lib/generateSyncMap'
@@ -425,88 +428,157 @@ export default function SongView({ songId, onBack }: SongViewProps) {
   }
 
   return (
-    <div className="relative flex h-screen flex-col overflow-hidden bg-[#f8fafc] text-slate-900">
-      <main className="flex min-h-0 flex-1 overflow-hidden">
-        <div className="relative flex-1 min-w-0">
-          {pdfUrl ? (
-            <PDFViewer
-              ref={pdfViewerRef}
-              pdfUrl={pdfUrl}
-              scrollContainerRef={scrollContainerRef}
-              sheetMarkers={loopMarkers}
-              onMarkerClick={handleMarkerClick}
-              onZoomStateChange={handleZoomStateChange}
-              onSystemBandsReady={() => onSystemBandsReadyRef.current?.()}
-              syncAnchors={import.meta.env.DEV && overlayEnabled ? anchors : undefined}
+    <AnnotationProvider songId={songId}>
+      <div className="relative flex h-screen flex-col overflow-hidden bg-[#f8fafc] text-slate-900">
+        <AnnotationToolbar />
+        <WriteModeToggle />
+        <main className="flex min-h-0 flex-1 overflow-hidden">
+          <div className="relative flex-1 min-w-0">
+            {pdfUrl ? (
+              <PDFViewer
+                ref={pdfViewerRef}
+                pdfUrl={pdfUrl}
+                scrollContainerRef={scrollContainerRef}
+                sheetMarkers={loopMarkers}
+                onMarkerClick={handleMarkerClick}
+                onZoomStateChange={handleZoomStateChange}
+                onSystemBandsReady={() => onSystemBandsReadyRef.current?.()}
+                syncAnchors={import.meta.env.DEV && overlayEnabled ? anchors : undefined}
+              />
+            ) : (
+              <div className="flex h-full items-center justify-center text-slate-400">
+                No score for this song yet.
+              </div>
+            )}
+            <ContextBar
+              pdfViewerRef={pdfViewerRef}
+              title={song.title}
+              onBack={onBack}
+              zoomOutDisabled={zoomOutDisabled}
+              zoomInDisabled={zoomInDisabled}
             />
-          ) : (
-            <div className="flex h-full items-center justify-center text-slate-400">
-              No score for this song yet.
-            </div>
-          )}
-          <ContextBar
+            {import.meta.env.DEV && (
+              <div className="absolute bottom-2 left-2 z-[60] flex items-center gap-1.5 rounded bg-white/80 border border-slate-300 px-1.5 py-1 shadow-sm backdrop-blur-sm">
+                <button
+                  onClick={handleGenerateSync}
+                  disabled={syncGenerating}
+                  className="rounded px-1.5 py-0.5 text-xs font-medium text-slate-600 hover:bg-slate-100 disabled:opacity-50"
+                >
+                  {syncGenerating ? 'Syncing…' : anchors.length ? `Sync ✓ ${anchors.length}` : 'Sync Score'}
+                </button>
+                <button
+                  onClick={handleExportSync}
+                  className="rounded px-1.5 py-0.5 text-xs font-medium text-slate-600 hover:bg-slate-100"
+                  title="Download the alignment trace as text"
+                >
+                  Export
+                </button>
+                <label className="flex items-center gap-1 text-xs text-slate-600 select-none">
+                  <input type="checkbox" checked={overlayEnabled} onChange={(e) => setOverlayEnabled(e.target.checked)} />
+                  overlay
+                </label>
+              </div>
+            )}
+          </div>
+        </main>
+        {audioUrl && track && (
+          <PlayerDock
+            key={`${song.id}:${track.id}`}
+            audioUrl={audioUrl}
+            store={store}
+            leadInOffset={track.leadInOffset}
+            tracks={tracks}
+            activeTrackId={selectedTrackId ?? undefined}
+            onSelectTrack={handleSelectTrack}
+            onManageTracks={() => setManageOpen(true)}
+            scrollContainerRef={scrollContainerRef}
             pdfViewerRef={pdfViewerRef}
-            title={song.title}
-            onBack={onBack}
-            zoomOutDisabled={zoomOutDisabled}
-            zoomInDisabled={zoomInDisabled}
+            anchors={anchors}
+            beat={beat}
+            onAnchorsChange={setAnchors}
+            onLoopMarkersChange={handleLoopMarkersChange}
+            markerActivateRef={markerActivateRef}
+            createLoopRef={createLoopRef}
+            deleteLoopRef={deleteLoopRef}
+            selectLoopRef={selectLoopRef}
+            exitLoopRef={exitLoopRef}
+            onSystemBandsReadyRef={onSystemBandsReadyRef}
           />
-          {import.meta.env.DEV && (
-            <div className="absolute bottom-2 left-2 z-[60] flex items-center gap-1.5 rounded bg-white/80 border border-slate-300 px-1.5 py-1 shadow-sm backdrop-blur-sm">
-              <button
-                onClick={handleGenerateSync}
-                disabled={syncGenerating}
-                className="rounded px-1.5 py-0.5 text-xs font-medium text-slate-600 hover:bg-slate-100 disabled:opacity-50"
-              >
-                {syncGenerating ? 'Syncing…' : anchors.length ? `Sync ✓ ${anchors.length}` : 'Sync Score'}
-              </button>
-              <button
-                onClick={handleExportSync}
-                className="rounded px-1.5 py-0.5 text-xs font-medium text-slate-600 hover:bg-slate-100"
-                title="Download the alignment trace as text"
-              >
-                Export
-              </button>
-              <label className="flex items-center gap-1 text-xs text-slate-600 select-none">
-                <input type="checkbox" checked={overlayEnabled} onChange={(e) => setOverlayEnabled(e.target.checked)} />
-                overlay
-              </label>
-            </div>
-          )}
-        </div>
-      </main>
-      {audioUrl && track && (
-        <PlayerDock
-          key={`${song.id}:${track.id}`}
-          audioUrl={audioUrl}
-          store={store}
-          leadInOffset={track.leadInOffset}
-          tracks={tracks}
-          activeTrackId={selectedTrackId ?? undefined}
-          onSelectTrack={handleSelectTrack}
-          onManageTracks={() => setManageOpen(true)}
-          scrollContainerRef={scrollContainerRef}
-          pdfViewerRef={pdfViewerRef}
-          anchors={anchors}
-          beat={beat}
-          onAnchorsChange={setAnchors}
-          onLoopMarkersChange={handleLoopMarkersChange}
-          markerActivateRef={markerActivateRef}
-          createLoopRef={createLoopRef}
-          deleteLoopRef={deleteLoopRef}
-          selectLoopRef={selectLoopRef}
-          exitLoopRef={exitLoopRef}
-          onSystemBandsReadyRef={onSystemBandsReadyRef}
-        />
-      )}
-      {manageOpen && (
-        <TrackManager
-          songId={songId}
-          songTitle={song.title}
-          onChanged={() => void refreshTracks()}
-          onClose={() => setManageOpen(false)}
-        />
-      )}
-    </div>
+        )}
+        {manageOpen && (
+          <TrackManager
+            songId={songId}
+            songTitle={song.title}
+            onChanged={() => void refreshTracks()}
+            onClose={() => setManageOpen(false)}
+          />
+        )}
+      </div>
+    </AnnotationProvider>
+  )
+}
+
+/**
+ * Floating pencil button that enters annotation write mode.
+ *
+ * Hidden when write mode is ON — the horizontal toolbar's Done button handles exit
+ * so there are never two simultaneous exit mechanisms competing for space.
+ *
+ * Positioning: desktop (non-touch, ≥1024px) places it below the zoom cluster at
+ * top-14; mobile/touch places it at top-2 alongside the back button row since the
+ * zoom buttons are hidden on those devices.
+ */
+function WriteModeToggle() {
+  const { writeMode, setWriteMode } = useAnnotations()
+
+  // Match the same breakpoint ContextBar uses to show/hide zoom buttons, and stay
+  // reactive so a tablet rotating portrait↔landscape repositions the button.
+  const [isMobile, setIsMobile] = useState(() =>
+    typeof window !== 'undefined'
+      ? window.matchMedia('(max-width: 1024px), (pointer: coarse)').matches
+      : false
+  )
+  useEffect(() => {
+    if (typeof window === 'undefined') return
+    const mql = window.matchMedia('(max-width: 1024px), (pointer: coarse)')
+    const handler = (e: MediaQueryListEvent) => setIsMobile(e.matches)
+    mql.addEventListener('change', handler)
+    return () => mql.removeEventListener('change', handler)
+  }, [])
+
+  // Hidden while in write mode — toolbar's Done button handles exit.
+  if (writeMode) return null
+
+  const handleEnter = () => {
+    setWriteMode(true)
+    // First entry on a touch device: hint that two fingers still scroll.
+    if (typeof window !== 'undefined') {
+      try {
+        const isTouch = window.matchMedia?.('(pointer: coarse)').matches
+        if (isTouch && !sessionStorage.getItem('anno:scrollHintShown')) {
+          toast('Two fingers to scroll', { duration: 3000 })
+          sessionStorage.setItem('anno:scrollHintShown', '1')
+        }
+      } catch {
+        // storage unavailable (private mode) — skip hint, entry still works
+      }
+    }
+  }
+
+  return (
+    <button
+      type="button"
+      onClick={handleEnter}
+      aria-label="Annotate"
+      title="Annotate"
+      // Desktop: align under the zoom cluster, which sits at right = px-3 (12px) +
+      // mr-[68px] to clear the edge scrubber rail → right-[80px]. Mobile/touch: zoom
+      // buttons are hidden, so float at the top-right next to the back-button row.
+      className={`pointer-events-auto fixed z-40 flex h-[42px] w-[42px] items-center justify-center rounded-full border border-slate-200 bg-white text-[#0b1220] shadow transition hover:bg-slate-50 hover:border-slate-300 hover:shadow-md active:bg-slate-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#4F7F7A]/40 ${
+        isMobile ? 'right-3 top-2' : 'right-[80px] top-14'
+      }`}
+    >
+      <Pencil size={19} />
+    </button>
   )
 }

@@ -15,8 +15,10 @@ import {
   BLOBS_STORE,
   SONGS_STORE,
   TRACKS_STORE,
+  ANNOTATIONS_STORE,
 } from './audioStore.ts'
 import type { SavedLoop } from './types'
+import type { SongAnnotations } from './annotations.ts'
 import type { Anchor } from './syncMap.ts'
 import type { Transcription, BeatAnalysis } from './transcribe.ts'
 import type { LyricToken } from './lyricsExtract.ts'
@@ -165,6 +167,31 @@ export const deleteBlob = (key: string): Promise<void> =>
   tx(BLOBS_STORE, 'readwrite', (t) => t.objectStore(BLOBS_STORE).delete(key), () => undefined)
 
 // ---------------------------------------------------------------------------
+// Annotations (pen/highlighter strokes, kept in their own store keyed by songId
+// so large stroke JSON doesn't bloat the songs record).
+// ---------------------------------------------------------------------------
+
+export const loadAnnotations = (songId: string): Promise<SongAnnotations | null> => {
+  let req: IDBRequest
+  return tx<SongAnnotations | null>(
+    ANNOTATIONS_STORE,
+    'readonly',
+    (t) => {
+      req = t.objectStore(ANNOTATIONS_STORE).get(songId)
+    },
+    () => (req.result as SongAnnotations) ?? null
+  )
+}
+
+export const saveAnnotations = (songId: string, annotations: SongAnnotations): Promise<void> =>
+  tx(
+    ANNOTATIONS_STORE,
+    'readwrite',
+    (t) => t.objectStore(ANNOTATIONS_STORE).put(annotations, songId),
+    () => undefined
+  )
+
+// ---------------------------------------------------------------------------
 // Songs.
 // ---------------------------------------------------------------------------
 
@@ -259,7 +286,7 @@ export const deleteSong = async (id: string): Promise<void> => {
     ...tracks.flatMap((t) => (t.takeMeta ? [t.takeMeta.id] : [])),
   ]
   await tx(
-    [SONGS_STORE, TRACKS_STORE, BLOBS_STORE],
+    [SONGS_STORE, TRACKS_STORE, BLOBS_STORE, ANNOTATIONS_STORE],
     'readwrite',
     (t) => {
       t.objectStore(SONGS_STORE).delete(id)
@@ -267,6 +294,7 @@ export const deleteSong = async (id: string): Promise<void> => {
       tracks.forEach((tr) => trackStore.delete(tr.id))
       const blobStore = t.objectStore(BLOBS_STORE)
       blobKeys.forEach((k) => blobStore.delete(k))
+      t.objectStore(ANNOTATIONS_STORE).delete(id)
     },
     () => undefined
   )
@@ -310,6 +338,8 @@ export const duplicateSong = async (id: string): Promise<Song | null> => {
       analysis: t.analysis,
     })
   }
+  const srcAnnotations = await loadAnnotations(id)
+  if (srcAnnotations) await saveAnnotations(copy.id, srcAnnotations)
   return getSong(copy.id)
 }
 
