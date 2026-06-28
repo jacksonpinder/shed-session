@@ -60,6 +60,37 @@ const approx = (a: number, b: number, eps = 1e-9) => Math.abs(a - b) < eps
     `(${lastBez.args[4]}, ${lastBez.args[5]})`)
 }
 
+// ── two-point stroke: verify bezier endpoint matches second point in px ──────
+{
+  const twoPts: AnnotationPoint[] = [
+    [0.2, 0.3],
+    [0.8, 0.7],
+  ]
+  const cw = 500
+  const ch = 400
+  const twoPath = catmullRomPath(twoPts, cw, ch) as unknown as MockPath2D
+  const beziers = twoPath.ops.filter((o) => o.op === 'bezierCurveTo')
+  check('two-point stroke → exactly one bezier', beziers.length === 1, `${beziers.length} beziers`)
+  const b = beziers[0]
+  const expectedX = twoPts[1][0] * cw   // 0.8 * 500 = 400
+  const expectedY = twoPts[1][1] * ch   // 0.7 * 400 = 280
+  check('two-point bezier endpoint matches second point in px',
+    approx(b.args[4], expectedX) && approx(b.args[5], expectedY),
+    `got (${b.args[4]}, ${b.args[5]}) want (${expectedX}, ${expectedY})`)
+  // For a two-point stroke p0=p1 (phantom), so control point c1 = p1 + (p2-p0)/6 = p1 + (p2-p1)/6.
+  // c2 = p2 - (p3-p1)/6 = p2 - (p2-p1)/6 (phantom p3=p2).
+  const p1x = twoPts[0][0] * cw; const p1y = twoPts[0][1] * ch
+  const p2x = twoPts[1][0] * cw; const p2y = twoPts[1][1] * ch
+  const expC1x = p1x + (p2x - p1x) / 6
+  const expC1y = p1y + (p2y - p1y) / 6
+  const expC2x = p2x - (p2x - p1x) / 6
+  const expC2y = p2y - (p2y - p1y) / 6
+  check('two-point bezier control points follow Catmull-Rom formula',
+    approx(b.args[0], expC1x) && approx(b.args[1], expC1y) &&
+    approx(b.args[2], expC2x) && approx(b.args[3], expC2y),
+    `c1=(${b.args[0].toFixed(2)},${b.args[1].toFixed(2)}) c2=(${b.args[2].toFixed(2)},${b.args[3].toFixed(2)})`)
+}
+
 // ── normalizePoint (mock the bounding rect) ──────────────────────────────────
 {
   const fakeCanvas = {
@@ -88,7 +119,6 @@ const approx = (a: number, b: number, eps = 1e-9) => Math.abs(a - b) < eps
     tool: 'pen',
     color: '#000',
     width: 2,
-    page: 1,
     points: [
       [0, 0],
       [1, 0],

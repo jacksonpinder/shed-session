@@ -21,7 +21,6 @@ export type AnnotationStroke = {
   color: string // hex
   width: number // logical px (pre-scale)
   points: AnnotationPoint[]
-  page: number // 1-indexed
 }
 
 export type SongAnnotations = {
@@ -121,6 +120,8 @@ const HIGHLIGHT_ALPHA = 0.35
  * and `multiply` against transparent pixels yields black. Alpha-blended source-over
  * gives the translucent look without the artefact. Alpha/composite are reset after
  * each highlight stroke so subsequent strokes are unaffected.
+ *
+ * Assumes exclusive ownership of ctx — caller must not share this canvas with other layers.
  */
 export function redrawPage(
   ctx: CanvasRenderingContext2D,
@@ -191,6 +192,8 @@ const pointSegmentDistance = (p: AnnotationPoint, a: AnnotationPoint, b: Annotat
  * `point`. Checks point-to-segment distance for each consecutive pair so a hit on
  * the line between two sampled points counts, not just on the vertices. A single
  * isolated point is treated as a degenerate segment (distance to that point).
+ * @param radiusNorm - Eraser radius in normalized space. To convert from device pixels:
+ *   radiusNorm = eraserPx / canvasWidth (use canvasWidth for both axes; asymmetry is negligible).
  */
 export function strokeHitTest(
   stroke: AnnotationStroke,
