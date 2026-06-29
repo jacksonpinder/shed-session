@@ -22,6 +22,7 @@ export type LoopLaneStripProps = {
 // Chips render at higher z-index than bars so they always paint on top.
 const TOP_PAD = 2 // gap below the waveform
 const BAR_H = 4
+const BAR_ROW_GAP = 2 // vertical gap between stacked bars
 const BAR_RADIUS = 2
 const CHIP_OFFSET = 3 // chip top = bar bottom + CHIP_OFFSET (floats over next bar)
 const CHIP_H = 16
@@ -90,9 +91,11 @@ export default function LoopLaneStrip({
 
   const lanes = assignLanes(loops)
   const numLanes = laneCount(lanes)
-  // All bars stacked (numLanes * BAR_H), then the last chip floating below.
+  // All bars stacked with gaps, then the last chip floating below.
   const totalHeight =
-    numLanes > 0 ? TOP_PAD + numLanes * BAR_H + CHIP_OFFSET + CHIP_H + BOTTOM_PAD : 0
+    numLanes > 0
+      ? TOP_PAD + numLanes * BAR_H + (numLanes - 1) * BAR_ROW_GAP + CHIP_OFFSET + CHIP_H + BOTTOM_PAD
+      : 0
 
   const innerWidth = Math.max(0, containerWidth - chipInset * 2)
 
@@ -156,7 +159,7 @@ export default function LoopLaneStrip({
         {/* Bars layer */}
         {loops.map((loop) => {
           const lane = lanes[loop.id] ?? 0
-          const top = TOP_PAD + lane * BAR_H
+          const top = TOP_PAD + lane * (BAR_H + BAR_ROW_GAP)
           const isActive = loop.id === activeLoopId
           return (
             <button
@@ -186,7 +189,7 @@ export default function LoopLaneStrip({
         {/* Chip layer — above all bars, like the margin's chipZ band. */}
         {loops.map((loop) => {
           const lane = lanes[loop.id] ?? 0
-          const top = TOP_PAD + lane * BAR_H + BAR_H + CHIP_OFFSET
+          const top = TOP_PAD + lane * (BAR_H + BAR_ROW_GAP) + BAR_H + CHIP_OFFSET
           const place = chipPlacement.get(loop.id)
           if (!place) return null
           const isActive = loop.id === activeLoopId
