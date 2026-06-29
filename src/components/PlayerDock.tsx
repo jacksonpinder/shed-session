@@ -8,7 +8,7 @@ import {
   type MutableRefObject,
   type PointerEventHandler,
 } from 'react'
-import { ChevronDown, ChevronUp, Plus } from 'lucide-react'
+import { Plus } from 'lucide-react'
 import WaveSurfer from 'wavesurfer.js'
 import RegionsPlugin from 'wavesurfer.js/dist/plugins/regions.esm.js'
 import RecordPlugin from 'wavesurfer.js/dist/plugins/record.esm.js'
@@ -460,10 +460,10 @@ export default function PlayerDock(props: PlayerDockProps) {
   const [hasHydrated, setHasHydrated] = useState(false)
   const [nameModalOpen, setNameModalOpen] = useState(false)
   const [pendingLoopName, setPendingLoopName] = useState('')
+  // When set, the name modal is renaming this loop; when null, it's naming a
+  // freshly created (not-yet-saved) loop.
+  const [renameTargetId, setRenameTargetId] = useState<string | null>(null)
   const [selectedLoopId, setSelectedLoopId] = useState<string | null>(null)
-  const [lanesVisible, setLanesVisible] = useState<boolean>(
-    () => store.load<boolean>('practice:lanesVisible') ?? true
-  )
   const [scrollOnRepeat, setScrollOnRepeat] = useState(true)
   const [scrollRepeatPromptVisible, setScrollRepeatPromptVisible] = useState(false)
   const [scrollRepeatOffToastToken, setScrollRepeatOffToastToken] = useState(0)
@@ -2815,17 +2815,32 @@ export default function PlayerDock(props: PlayerDockProps) {
 
   const closeNameModal = () => {
     setNameModalOpen(false)
+    setRenameTargetId(null)
   }
 
-  const beginSaveRegion = () => {
-    if (!activeRegion || !activeRegionId || activeSavedLoop) {
-      return
+  // Cancel/dismiss: discard a not-yet-saved region when naming a new loop.
+  const cancelNameModal = () => {
+    if (!renameTargetId && activeRegionId && !activeSavedLoop) {
+      exitLoop()
     }
-    setPendingLoopName(`Loop ${savedLoops.length + 1}`)
+    closeNameModal()
+  }
+
+  const openRenameModal = (id: string) => {
+    const loop = savedLoopsRef.current.find((l) => l.id === id)
+    if (!loop) return
+    setRenameTargetId(id)
+    setPendingLoopName(loop.name)
     setNameModalOpen(true)
   }
 
   const confirmSaveRegion = () => {
+    if (renameTargetId) {
+      const name = pendingLoopName.trim()
+      if (name) saveLoopName(renameTargetId, name)
+      closeNameModal()
+      return
+    }
     if (!activeRegion || !activeRegionId || activeSavedLoop) {
       closeNameModal()
       return
@@ -3048,22 +3063,12 @@ export default function PlayerDock(props: PlayerDockProps) {
     attachRegionHandlers(region)
     activateRegion(region.id, { autoplay: false })
 
-    // Auto-save immediately with a default name so the chip appears in the sidebar.
-    // The user can rename inline in the sidebar chip.
-    const name = `Loop ${savedLoopsRef.current.length + 1}`
-    setRegionLabel(region, name)
-    const autoPos = resolveLoopSheetPosition(trackToSongTime(start))
-    const draftPos = autoPos ?? pdfViewerRef?.current?.getSheetPosition()
-    const nextLoop: SavedLoop = {
-      id: region.id,
-      name,
-      start: trackToSongTime(start),
-      end: trackToSongTime(end),
-      color,
-      loopOn: true,
-      sheetLinkDraft: draftPos ?? undefined,
-    }
-    setSavedLoops((loops) => [...loops, nextLoop])
+    // Prompt for a name; confirmSaveRegion persists the loop, cancelNameModal
+    // discards the not-yet-saved region. Open directly (refs are fresh this tick;
+    // the render-scoped activeRegion* consts aren't yet).
+    setRenameTargetId(null)
+    setPendingLoopName(`Loop ${savedLoopsRef.current.length + 1}`)
+    setNameModalOpen(true)
   }
 
   const selectSavedLoop = (loop: SavedLoop) => {
@@ -3140,10 +3145,6 @@ export default function PlayerDock(props: PlayerDockProps) {
   useEffect(() => {
     setSelectedLoopId(activeRegionId)
   }, [activeRegionId])
-
-  useEffect(() => {
-    store.save('practice:lanesVisible', lanesVisible)
-  }, [lanesVisible])
 
   // Populate callback refs so SongView can invoke PlayerDock internals
   useEffect(() => {
@@ -3332,12 +3333,10 @@ export default function PlayerDock(props: PlayerDockProps) {
                 </div>
 
                 {audioReady && savedLoops.length > 0 && (
-                  <div className="relative">
                   <LoopLaneStrip
                     loops={savedLoops}
                     duration={duration}
                     activeLoopId={activeRegionId}
-                    lanesVisible={lanesVisible}
                     chipInset={0}
                     onSelect={(id) => {
                       if (activeRegionIdRef.current === id) {
@@ -3347,28 +3346,9 @@ export default function PlayerDock(props: PlayerDockProps) {
                         if (loop) selectSavedLoop(loop)
                       }
                     }}
-                    onRename={saveLoopName}
+                    onRename={openRenameModal}
                     onDelete={deleteSavedLoop}
-                    onExpand={() => setLanesVisible(true)}
-                    onCollapse={() => setLanesVisible(false)}
                   />
-
-                  {/* Expand/collapse — sits at the right end of the lane, even with
-                      the collapsed peek. */}
-                  <button
-                    type="button"
-                    onClick={() => setLanesVisible((v) => !v)}
-                    className="absolute right-0 top-0 z-10 flex h-5 w-5 items-center justify-center rounded-full text-slate-400 transition hover:bg-black/5 hover:text-slate-600"
-                    aria-label={lanesVisible ? 'Hide loop lanes' : 'Show loop lanes'}
-                    title={lanesVisible ? 'Hide loops' : 'Show loops'}
-                  >
-                    {lanesVisible ? (
-                      <ChevronUp size={12} strokeWidth={2.5} />
-                    ) : (
-                      <ChevronDown size={12} strokeWidth={2.5} />
-                    )}
-                  </button>
-                </div>
               )}
               </div>
 
@@ -3544,9 +3524,12 @@ export default function PlayerDock(props: PlayerDockProps) {
       {audioReady && nameModalOpen && (
         <div className="fixed inset-0 z-[9998] flex items-center justify-center bg-slate-950/40 px-4">
           <div className="w-full max-w-sm rounded-2xl border border-slate-200 bg-white p-5 shadow-xl">
-            <h3 className="text-lg font-semibold text-slate-900">Name this loop</h3>
-            <p className="mt-1 text-sm text-slate-500">Give this region a memorable name.</p>
+            <h3 className="text-lg font-semibold text-slate-900">
+              {renameTargetId ? 'Rename loop' : 'Name this loop'}
+            </h3>
+            <p className="mt-1 text-sm text-slate-500">Give this loop a memorable name.</p>
             <input
+              autoFocus
               className="mt-4 w-full rounded-xl border border-slate-200 px-3 py-2 text-slate-900 shadow-sm focus:border-[#4F7F7A] focus:outline-none"
               value={pendingLoopName}
               onChange={(event) => setPendingLoopName(event.target.value)}
@@ -3556,7 +3539,7 @@ export default function PlayerDock(props: PlayerDockProps) {
                   confirmSaveRegion()
                 }
                 if (event.key === 'Escape') {
-                  closeNameModal()
+                  cancelNameModal()
                 }
               }}
             />
@@ -3564,7 +3547,7 @@ export default function PlayerDock(props: PlayerDockProps) {
               <button
                 className="rounded-full border border-slate-200 px-4 py-2 text-sm text-slate-600 hover:bg-slate-100"
                 type="button"
-                onClick={closeNameModal}
+                onClick={cancelNameModal}
               >
                 Cancel
               </button>
@@ -3573,7 +3556,7 @@ export default function PlayerDock(props: PlayerDockProps) {
                 type="button"
                 onClick={confirmSaveRegion}
               >
-                Save loop
+                {renameTargetId ? 'Save' : 'Save loop'}
               </button>
             </div>
           </div>

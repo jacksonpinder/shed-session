@@ -209,3 +209,25 @@ Converted single-song app to multi-song library:
 - D4: Nav button (auto-scroll with sync-gating + why-hint)
 - E1/E2 + LG: Edge scrubber rail, margin loop bars, blurred-peek collapse
 - Refinement passes 1–3: rail sizing, bar continuity, chip z-order, pointer-events fix, scrubber reachability
+
+---
+
+## 2026-06-28 — Loop lane redesign (compact bars + per-row chip bands)
+
+**What was done:**
+- Rewrote `LoopLaneStrip.tsx` to the rail-consistent model: 4px bars packed into rows via `assignLanes`, with one chip band per row (interleaved, mirroring the `PDFViewer` margin bars/chips). Chips centered on their bar, offset apart on collision, truncated only as a last resort.
+- Added `src/lib/placeChips.ts` (pure 1D label de-overlap: forward/backward clamp + water-fill truncation) and `tests/placeChips.test.ts` (all pass).
+- Each chip has an always-visible ⋯ menu (opens upward) → Rename (reuses the name modal) / Delete (existing `deleteSavedLoop`, immediate + undo toast). Double-click a chip also opens rename.
+- `PlayerDock.tsx`: loop creation now opens the name modal (default `Loop N`) instead of auto-saving; `cancelNameModal` discards the not-yet-saved region. Added `renameTargetId` so the one modal handles both create and rename. Removed the collapse/peek system (`lanesVisible` state + persistence + chevron toggle) and unused `ChevronUp/Down` import.
+- Removed `LoopLaneStripProps.lanesVisible/onExpand/onCollapse`.
+
+**Decisions made:**
+- Layout is interleaved per-row chip bands (not one global band); chips centered + offset + truncate (see DECISIONS).
+- Rename uses the modal (not inline edit); delete is immediate with undo (no confirm).
+
+**What's next:**
+- Optional: the standalone "Add inline Loop renaming" backlog item is now superseded by the modal rename — revisit whether to keep it.
+- The "Loop chip outline clipping" backlog item is naturally addressed (lane container is overflow-visible), but worth a visual confirm at the extreme edges.
+
+**Handoff state:**
+App loads and runs. Verified live on a dev preview (1400px): create→modal→save, cancel-discards-region, 4px bars in two rows for overlapping loops, per-row centered chips with truncation, select/deselect toggle, ⋯ menu rename + delete + undo, double-click rename. No console errors. `npm run typecheck` introduces no new errors (pre-existing ones unchanged); `tests/placeChips.test.ts` passes. Note: the lane needs adequate width — at very narrow viewports the whole transport pill column collapses (pre-existing behavior, not specific to this change).

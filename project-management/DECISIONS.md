@@ -109,3 +109,13 @@ _Architectural and UX decisions with rationale. Add an entry whenever a non-obvi
 **Decision:** Cursor SVGs are the exact icon paths from lucide-react (`Pencil`, `Highlighter`, `Eraser`), not bespoke designs.
 **Why:** Pixel-perfect consistency with the toolbar icons. The user sees the icon in the button, then that same icon as their cursor — no ambiguity about which tool is active.
 **Trade-off:** Lucide stroke-width (2px) is fine at 20–24px sizes (icons) but can look faint at smaller cursor sizes. Mitigated by using the icons at 24px with solid `stroke` and no fill.
+
+### Loop lane: interleaved per-row chip bands, centered + offset + truncate
+**Decision:** In the redesigned loop lane, bars pack into rows via `assignLanes`, and each row gets its own chip band directly below it (interleaved bar→chips→bar→chips), rather than one global chip band beneath all bars. Chips are centered on their bar, offset apart when neighbours in the same row collide, and only truncated (`…`) when offsetting can't prevent overlap. Chips paint in a higher-z layer than bars (a row's chip may sit over the next row's bar).
+**Why:** Mirrors the established page-margin bars/chips pattern in `PDFViewer.tsx` (chips aligned to their own bar, separate higher-z chip layer), keeping the three loop coordinate spaces (dock lane, edge rail, page margin) visually consistent. Per-row placement keeps each row independent so chip crowding in one row never reflows another.
+**Trade-off:** More layout math than name-in-bar (a per-row 1D de-overlap pass in `src/lib/placeChips.ts`, fed by canvas-measured chip widths). Accepted because it's pure/unit-tested and runs cheaply per row.
+
+### Loop create + rename both go through the name modal
+**Decision:** Creating a loop opens the name modal (default `Loop N`) instead of auto-saving; cancelling discards the not-yet-saved region. Rename (⋯ menu or double-click) reuses the same modal via a `renameTargetId` flag. Delete (⋯ menu) is immediate with an undo toast — no confirm dialog.
+**Why:** One naming surface for both flows is simpler than separate inline-edit + modal paths, and prompting at creation lets the user name a loop while the context is fresh. Immediate-delete-with-undo (already implemented in `deleteSavedLoop`) is lower friction than a confirm step.
+**Trade-off:** A modal at creation is one more interaction than silent auto-save; mitigated by the default `Loop N` so Enter accepts instantly. The standalone "inline rename on blur" backlog item is effectively superseded.

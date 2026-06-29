@@ -1,74 +1,64 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
-import { ChevronDown, Trash2 } from 'lucide-react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { MoreHorizontal, Pencil, Trash2 } from 'lucide-react'
 import type { SavedLoop } from '../lib/types'
 import { assignLanes, laneCount } from '../lib/assignLanes'
+import { placeChips, type ChipInput } from '../lib/placeChips'
 
 export type LoopLaneStripProps = {
   loops: SavedLoop[]
   duration: number
   activeLoopId: string | null
-  lanesVisible: boolean
   onSelect: (id: string) => void
-  onRename: (id: string, name: string) => void
+  /** Open the rename flow for a loop (parent owns the name modal). */
+  onRename: (id: string) => void
   onDelete: (id: string) => void
-  /** Tapping the blurred collapsed peek zone expands the lane. */
-  onExpand: () => void
-  /** Tapping the expanded lane's bottom bumper collapses it. */
-  onCollapse: () => void
-  /** Horizontal inset (px) for the expanded chips, so they line up with the
-   * inset waveform while the peek + bumper still run full-bleed to the edges. */
+  /** Horizontal inset (px) so bars + chips line up with an inset waveform. */
   chipInset?: number
 }
 
-const LANE_H = 20
-const LANE_GAP = 8
-const LANE_PAD = 8
+// Compact rail-style geometry. A loop is a 4px bar (packed into non-overlapping
+// rows via assignLanes) with its name chip in a band directly below that row —
+// the horizontal rhyme of the page-margin bars/chips in PDFViewer.
+const TOP_PAD = 2 // gap below the waveform
+const BAR_H = 4
+const BAR_RADIUS = 2
+const BAR_CHIP_GAP = 2 // bar → its chip band
+const CHIP_H = 16
+const ROW_GAP = 3 // one row's chip band → next row's bar
+const BOTTOM_PAD = 2
 const MIN_BAR_WIDTH_PX = 10
+const CHIP_GAP = 4 // min px between chips in a row
 
-// Collapsed "whisper layer" (LG design): each lane persists as a micro-row whose
-// height + opacity recede with depth, the whole zone blurred to read as texture.
-const PEEK_ROW_HEIGHTS = [5, 4, 3] // lane 0, 1, 2+ (clamped to last)
-const PEEK_ROW_OPACITIES = [1, 0.7, 0.45]
-const PEEK_ROW_GAP = 2
-const peekRowHeight = (lane: number) =>
-  PEEK_ROW_HEIGHTS[Math.min(lane, PEEK_ROW_HEIGHTS.length - 1)]
-const peekRowOpacity = (lane: number) =>
-  PEEK_ROW_OPACITIES[Math.min(lane, PEEK_ROW_OPACITIES.length - 1)]
+const ROW_PITCH = BAR_H + BAR_CHIP_GAP + CHIP_H + ROW_GAP
 
-// Gap above the first loop (below the waveform): lets the blur fade out before
-// it meets the waveform and widens the tap-to-expand target.
-const LANE_TOP_PAD = 4
-// Reserved strip at the lane bottom for the centered "Loops" pill, so the pill
-// never overlaps a loop. Loops draw above it; the strip stays click-to-collapse.
-const LANE_BOTTOM_CLEARANCE = 4
-// Matches `--waveform-edge-pad` in tailwind.css so lane bars line up with the
-// waveform peaks above them. The waveform fills its host edge-to-edge (no
-// internal scroll padding), so bars span the full width too.
-const EDGE_PAD = 0
+// Natural chip width = measured text + paddings + the ⋯ icon.
+const CHIP_FONT = '600 10px'
+const CHIP_TEXT_PAD = 12 // px-1.5 left + right
+const CHIP_ICON_GAP = 3
+const CHIP_ICON_W = 14
 
 export default function LoopLaneStrip({
   loops,
   duration,
   activeLoopId,
-  lanesVisible,
   onSelect,
   onRename,
   onDelete,
-  onExpand,
-  onCollapse,
   chipInset = 0,
 }: LoopLaneStripProps) {
   const containerRef = useRef<HTMLDivElement>(null)
   const [containerWidth, setContainerWidth] = useState(0)
-  const [editingId, setEditingId] = useState<string | null>(null)
-  const [editValue, setEditValue] = useState('')
-  const editInputRef = useRef<HTMLInputElement | null>(null)
+  const [fontFamily, setFontFamily] = useState('system-ui, sans-serif')
+  const [menuId, setMenuId] = useState<string | null>(null)
+  const measureCanvasRef = useRef<HTMLCanvasElement | null>(null)
 
   useEffect(() => {
     const el = containerRef.current
     if (!el) return
     const update = (w: number) => setContainerWidth(Math.round(w))
     update(el.getBoundingClientRect().width)
+    const ff = getComputedStyle(el).fontFamily
+    if (ff) setFontFamily(ff)
     if (typeof ResizeObserver === 'undefined') return
     const ro = new ResizeObserver((entries) => {
       const w = entries[0]?.contentRect.width
@@ -78,24 +68,34 @@ export default function LoopLaneStrip({
     return () => ro.disconnect()
   }, [])
 
+  // Dismiss the ⋯ menu on outside click / Escape.
+  useEffect(() => {
+    if (!menuId) return
+    const onDown = (e: MouseEvent) => {
+      const target = e.target as Node | null
+      if (target && containerRef.current?.contains(target)) {
+        const within = (target as HTMLElement).closest?.('[data-loop-menu]')
+        if (within) return
+      }
+      setMenuId(null)
+    }
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setMenuId(null)
+    }
+    document.addEventListener('pointerdown', onDown)
+    document.addEventListener('keydown', onKey)
+    return () => {
+      document.removeEventListener('pointerdown', onDown)
+      document.removeEventListener('keydown', onKey)
+    }
+  }, [menuId])
+
   const lanes = assignLanes(loops)
   const numLanes = laneCount(lanes)
-  const laneAreaH =
-    numLanes > 0
-      ? LANE_PAD + numLanes * (LANE_H + LANE_GAP) - LANE_GAP + LANE_BOTTOM_CLEARANCE
-      : 0
+  const totalHeight =
+    numLanes > 0 ? TOP_PAD + numLanes * ROW_PITCH - ROW_GAP + BOTTOM_PAD : 0
 
-  // Collapsed peek: a 4px top gap (blur fade + tap area), the micro-rows, then a
-  // bottom clearance strip for the centered pill.
-  let peekRowsH = 0
-  for (let lane = 0; lane < numLanes; lane++) {
-    peekRowsH += peekRowHeight(lane) + (lane > 0 ? PEEK_ROW_GAP : 0)
-  }
-  const peekH = numLanes > 0 ? LANE_TOP_PAD + peekRowsH + LANE_BOTTOM_CLEARANCE : 0
-
-  // Bars are positioned within an inset layer that matches the waveform's
-  // edge padding, so a loop's bar sits directly under its waveform region.
-  const innerWidth = Math.max(0, containerWidth - EDGE_PAD * 2)
+  const innerWidth = Math.max(0, containerWidth - chipInset * 2)
 
   const timeToPct = useCallback(
     (t: number) => (duration > 0 ? (t / duration) * 100 : 0),
@@ -112,190 +112,167 @@ export default function LoopLaneStrip({
     [duration, innerWidth]
   )
 
-  const startEdit = (loop: SavedLoop) => {
-    setEditingId(loop.id)
-    setEditValue(loop.name)
-    setTimeout(() => {
-      editInputRef.current?.select()
-    }, 0)
-  }
+  const measureChipWidth = useCallback(
+    (name: string) => {
+      if (typeof document === 'undefined') return name.length * 6 + 28
+      let canvas = measureCanvasRef.current
+      if (!canvas) {
+        canvas = document.createElement('canvas')
+        measureCanvasRef.current = canvas
+      }
+      const ctx = canvas.getContext('2d')
+      if (!ctx) return name.length * 6 + 28
+      ctx.font = `${CHIP_FONT} ${fontFamily}`
+      const textW = ctx.measureText(name || ' ').width
+      return Math.ceil(textW) + CHIP_TEXT_PAD + CHIP_ICON_GAP + CHIP_ICON_W
+    },
+    [fontFamily]
+  )
 
-  const commitEdit = (loop: SavedLoop) => {
-    const v = editValue.trim()
-    if (v && v !== loop.name) onRename(loop.id, v)
-    setEditingId(null)
-  }
+  // Per-row chip placement: centre each chip on its bar, offset apart on
+  // collision, truncate only when offsetting can't prevent overlap.
+  const chipPlacement = useMemo(() => {
+    const out = new Map<string, { leftPx: number; widthPx: number }>()
+    if (innerWidth <= 0 || duration <= 0) return out
+    for (let lane = 0; lane < numLanes; lane++) {
+      const rowChips: ChipInput[] = loops
+        .filter((l) => (lanes[l.id] ?? 0) === lane)
+        .map((l) => ({
+          id: l.id,
+          centerPx: ((l.start + l.end) / 2 / duration) * innerWidth,
+          widthPx: measureChipWidth(l.name),
+        }))
+      for (const p of placeChips(rowChips, innerWidth, CHIP_GAP)) {
+        out.set(p.id, { leftPx: p.leftPx, widthPx: p.widthPx })
+      }
+    }
+    return out
+  }, [loops, lanes, numLanes, innerWidth, duration, measureChipWidth])
+
+  if (numLanes === 0) return null
 
   return (
-    <div className="relative" ref={containerRef}>
-      {/* Lane area — animates between the full lane height and the collapsed peek. */}
-      <div
-        className="relative w-full overflow-hidden transition-[height] duration-200 ease-out motion-reduce:transition-none"
-        style={{ height: lanesVisible ? laneAreaH : peekH }}
-        aria-hidden={!lanesVisible && numLanes === 0}
-      >
-        {/* Collapsed "whisper layer": blurred micro-rows preserving chip proportions.
-            The whole zone is a single tap target that expands the lane. */}
-        {!lanesVisible && numLanes > 0 && (
-          <button
-            type="button"
-            onClick={onExpand}
-            aria-label="Show loop lanes"
-            className="absolute inset-0 flex flex-col justify-start"
-            style={{
-              left: EDGE_PAD,
-              right: EDGE_PAD,
-              paddingTop: LANE_TOP_PAD,
-              gap: PEEK_ROW_GAP,
-              filter: 'blur(2px)',
-              opacity: 0.45,
-              cursor: 'pointer',
-            }}
-          >
-            {Array.from({ length: numLanes }, (_, lane) => (
-              <div
-                key={lane}
-                className="relative w-full"
-                style={{ height: peekRowHeight(lane), opacity: peekRowOpacity(lane) }}
-              >
-                {loops
-                  .filter((loop) => (lanes[loop.id] ?? 0) === lane)
-                  .map((loop) => (
-                    <div
-                      key={loop.id}
-                      className="absolute top-0 h-full rounded-[3px]"
-                      style={{
-                        left: `${timeToPct(loop.start)}%`,
-                        width: `${barWidthPct(loop.start, loop.end)}%`,
-                        backgroundColor: loop.color,
-                        pointerEvents: 'none',
-                      }}
-                    />
-                  ))}
-              </div>
-            ))}
-          </button>
-        )}
-
-        {/* Full-height collapse target: the whole expanded lane background collapses
-            on click, with a hover wash + chevron across the full height. Sits BEHIND
-            the chip layer (which is click-through except the chips themselves). */}
-        {lanesVisible && numLanes > 0 && (
-          <button
-            type="button"
-            onClick={onCollapse}
-            aria-label="Hide loop lanes"
-            className="group absolute inset-0 flex items-end justify-center"
-            style={{ cursor: 'pointer' }}
-          >
-            <span className="absolute inset-0 bg-gradient-to-t from-black/[0.05] via-black/[0.02] to-transparent opacity-0 transition-opacity duration-150 group-hover:opacity-100" />
-            <ChevronDown
-              size={10}
-              strokeWidth={2.5}
-              className="relative mb-1 text-slate-400 opacity-0 transition-opacity duration-150 group-hover:opacity-100"
+    <div className="relative" ref={containerRef} style={{ height: totalHeight }}>
+      <div className="absolute inset-y-0" style={{ left: chipInset, right: chipInset }}>
+        {/* Bars layer */}
+        {loops.map((loop) => {
+          const lane = lanes[loop.id] ?? 0
+          const top = TOP_PAD + lane * ROW_PITCH
+          const isActive = loop.id === activeLoopId
+          return (
+            <button
+              key={`bar-${loop.id}`}
+              type="button"
+              onClick={() => onSelect(loop.id)}
+              aria-label={loop.name}
+              aria-pressed={isActive}
+              className="absolute transition-[box-shadow,opacity] hover:brightness-105"
+              style={{
+                left: `${timeToPct(loop.start)}%`,
+                width: `${barWidthPct(loop.start, loop.end)}%`,
+                top,
+                height: BAR_H,
+                borderRadius: BAR_RADIUS,
+                backgroundColor: loop.color,
+                opacity: isActive ? 1 : loop.loopOn ? 0.9 : 0.55,
+                zIndex: isActive ? 2 : 1,
+                boxShadow: isActive
+                  ? '0 0 0 1.5px rgba(255,255,255,0.95), 0 1px 3px rgba(15,23,42,0.25)'
+                  : undefined,
+              }}
             />
-          </button>
-        )}
+          )
+        })}
 
-        {/* Inset positioning layer aligned to the waveform peaks. Click-through so the
-            collapse target behind it receives taps on empty space; the chips opt back
-            in to pointer events. Hidden while collapsed. */}
-        <div
-          className="absolute inset-y-0"
-          style={{
-            left: EDGE_PAD + chipInset,
-            right: EDGE_PAD + chipInset,
-            opacity: lanesVisible ? 1 : 0,
-            pointerEvents: 'none',
-          }}
-        >
-          {loops.map((loop) => {
-            const lane = lanes[loop.id] ?? 0
-            const top = LANE_PAD + lane * (LANE_H + LANE_GAP)
-            const leftPct = timeToPct(loop.start)
-            const widthPct = barWidthPct(loop.start, loop.end)
-            const isActive = loop.id === activeLoopId
-            const isEditing = loop.id === editingId
-            const showLabel =
-              innerWidth > 0 && (widthPct / 100) * innerWidth > 44
-
-            return (
-              <div
-                key={loop.id}
-                className="group absolute"
-                style={{ left: `${leftPct}%`, width: `${widthPct}%`, top, height: LANE_H, pointerEvents: 'auto' }}
+        {/* Chip layer — above all bars, like the margin's chipZ band. */}
+        {loops.map((loop) => {
+          const lane = lanes[loop.id] ?? 0
+          const top = TOP_PAD + lane * ROW_PITCH + BAR_H + BAR_CHIP_GAP
+          const place = chipPlacement.get(loop.id)
+          if (!place) return null
+          const isActive = loop.id === activeLoopId
+          const isMenuOpen = menuId === loop.id
+          return (
+            <div
+              key={`chip-${loop.id}`}
+              className="absolute flex items-center rounded-md"
+              style={{
+                left: place.leftPx,
+                top,
+                maxWidth: place.widthPx,
+                height: CHIP_H,
+                backgroundColor: loop.color,
+                zIndex: isActive || isMenuOpen ? 41 : 40,
+                boxShadow: isActive
+                  ? '0 0 0 1.5px rgba(255,255,255,0.95), 0 1px 3px rgba(15,23,42,0.25)'
+                  : '0 1px 3px rgba(15,23,42,0.18)',
+              }}
+            >
+              <button
+                type="button"
+                onClick={() => onSelect(loop.id)}
+                onDoubleClick={(e) => {
+                  e.preventDefault()
+                  onRename(loop.id)
+                }}
+                title={loop.name}
+                aria-label={loop.name}
+                aria-pressed={isActive}
+                className="min-w-0 flex-1 truncate pl-1.5 pr-0.5 text-left text-[10px] font-semibold leading-none text-white"
+                style={{ textShadow: '0 1px 2px rgba(0,0,0,0.3)' }}
               >
-                <button
-                  type="button"
-                  title={isEditing ? undefined : loop.name}
-                  onClick={() => {
-                    if (!isEditing) onSelect(loop.id)
-                  }}
-                  onDoubleClick={(e) => {
-                    e.preventDefault()
-                    startEdit(loop)
-                  }}
-                  className="absolute inset-0 flex items-center overflow-hidden rounded transition-[opacity] hover:brightness-105"
-                  style={{
-                    backgroundColor: loop.color,
-                    opacity: isActive ? 1 : loop.loopOn ? 0.9 : 0.55,
-                    zIndex: isActive ? 2 : 1,
-                    boxShadow: isActive
-                      ? '0 0 0 2px rgba(255,255,255,0.9), 0 0 0 3.5px rgba(0,0,0,0.18)'
-                      : undefined,
-                  }}
-                  aria-pressed={isActive}
-                  aria-label={loop.name}
-                >
-                  {isEditing ? (
-                    <input
-                      ref={editInputRef}
-                      className="absolute inset-0 w-full bg-transparent px-1.5 text-[10px] font-medium text-white outline-none"
-                      style={{ textShadow: '0 1px 2px rgba(0,0,0,0.3)' }}
-                      value={editValue}
-                      onChange={(e) => setEditValue(e.target.value)}
-                      onBlur={() => commitEdit(loop)}
-                      onKeyDown={(e) => {
-                        if (e.key === 'Enter') e.currentTarget.blur()
-                        if (e.key === 'Escape') setEditingId(null)
-                      }}
-                      onClick={(e) => e.stopPropagation()}
-                    />
-                  ) : (
-                    showLabel && (
-                      <span
-                        className="truncate px-1.5 text-[10px] font-medium leading-tight text-white"
-                        style={{ textShadow: '0 1px 2px rgba(0,0,0,0.3)' }}
-                      >
-                        {loop.name}
-                      </span>
-                    )
-                  )}
-                </button>
+                {loop.name}
+              </button>
+              <button
+                type="button"
+                data-loop-menu
+                onClick={(e) => {
+                  e.stopPropagation()
+                  setMenuId((cur) => (cur === loop.id ? null : loop.id))
+                }}
+                aria-label={`Loop options for ${loop.name}`}
+                aria-haspopup="menu"
+                aria-expanded={isMenuOpen}
+                className="flex h-full shrink-0 items-center rounded-r-md pl-0.5 pr-1 text-white/85 transition hover:text-white"
+              >
+                <MoreHorizontal size={12} strokeWidth={2.25} />
+              </button>
 
-                {/* Delete button — visible on hover or when active */}
-                {!isEditing && (
+              {isMenuOpen && (
+                <div
+                  data-loop-menu
+                  role="menu"
+                  className="absolute bottom-full right-0 z-50 mb-1 min-w-[120px] overflow-hidden rounded-lg border border-slate-200 bg-white py-1 shadow-lg shadow-black/15"
+                >
                   <button
                     type="button"
-                    onClick={(e) => {
-                      e.stopPropagation()
+                    role="menuitem"
+                    onClick={() => {
+                      setMenuId(null)
+                      onRename(loop.id)
+                    }}
+                    className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-[12px] text-slate-700 hover:bg-slate-100"
+                  >
+                    <Pencil size={13} strokeWidth={2} />
+                    Rename
+                  </button>
+                  <button
+                    type="button"
+                    role="menuitem"
+                    onClick={() => {
+                      setMenuId(null)
                       onDelete(loop.id)
                     }}
-                    className={`pointer-events-auto absolute right-0.5 top-0.5 z-10 flex h-3.5 w-3.5 items-center justify-center rounded text-white/80 transition hover:bg-black/20 hover:text-white ${
-                      isActive
-                        ? 'opacity-100'
-                        : 'opacity-0 group-hover:opacity-100'
-                    }`}
-                    style={{ zIndex: 10 }}
-                    aria-label={`Delete ${loop.name}`}
+                    className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-[12px] text-red-600 hover:bg-red-50"
                   >
-                    <Trash2 size={9} strokeWidth={2} />
+                    <Trash2 size={13} strokeWidth={2} />
+                    Delete
                   </button>
-                )}
-              </div>
-            )
-          })}
-        </div>
+                </div>
+              )}
+            </div>
+          )
+        })}
       </div>
     </div>
   )

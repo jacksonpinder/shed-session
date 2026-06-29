@@ -60,7 +60,7 @@ Three-zone grid (`1fr auto 1fr`): left = Add/Exit loop button; center = pill (Re
 
 ### Loop lane (`LoopLaneStrip.tsx`)
 
-Expanded: color-coded rows of loop chips with a connector bracket from the active waveform region down to the active chip. Collapsed: blurred "whisper" peek (5/4/3px rows, opacity fadeout, blur 2px) + tap-to-expand; invisible bumper at bottom for collapse.
+Rail-consistent compact lane: 4px bars packed into rows via `assignLanes`, with one chip band per row directly below it (interleaved, mirroring the `PDFViewer` margin bars/chips). Chips are centered on their bar, offset apart on collision and truncated as a last resort (`src/lib/placeChips.ts`, unit-tested via canvas-measured widths). Bars and chips both toggle select/deselect; each chip has an always-visible ⋯ menu (opens upward) → Rename (name modal) / Delete (immediate + undo toast). Loop creation opens the name modal (default `Loop N`); cancel discards the unsaved region. Double-click a chip also opens rename. (The old expand/collapse "whisper peek" + chevron toggle + `lanesVisible` persistence were removed in this redesign.)
 
 ---
 
