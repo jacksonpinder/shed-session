@@ -16,20 +16,18 @@ export type LoopLaneStripProps = {
   chipInset?: number
 }
 
-// Compact rail-style geometry. A loop is a 4px bar (packed into non-overlapping
-// rows via assignLanes) with its name chip in a band directly below that row —
-// the horizontal rhyme of the page-margin bars/chips in PDFViewer.
+// Compact rail-style geometry. Bars are stacked directly (lane 0 on top, lane 1
+// below, etc.) with no gap between them. Each loop's name chip floats CHIP_OFFSET
+// px below the bottom edge of its own bar, overlapping the bar(s) below it.
+// Chips render at higher z-index than bars so they always paint on top.
 const TOP_PAD = 2 // gap below the waveform
 const BAR_H = 4
 const BAR_RADIUS = 2
-const BAR_CHIP_GAP = 2 // bar → its chip band
+const CHIP_OFFSET = 3 // chip top = bar bottom + CHIP_OFFSET (floats over next bar)
 const CHIP_H = 16
-const ROW_GAP = 3 // one row's chip band → next row's bar
 const BOTTOM_PAD = 2
 const MIN_BAR_WIDTH_PX = 10
-const CHIP_GAP = 4 // min px between chips in a row
-
-const ROW_PITCH = BAR_H + BAR_CHIP_GAP + CHIP_H + ROW_GAP
+const CHIP_GAP = 4 // min px between chips in the same lane
 
 // Natural chip width = measured text + paddings + the ⋯ icon.
 const CHIP_FONT = '600 10px'
@@ -92,8 +90,9 @@ export default function LoopLaneStrip({
 
   const lanes = assignLanes(loops)
   const numLanes = laneCount(lanes)
+  // All bars stacked (numLanes * BAR_H), then the last chip floating below.
   const totalHeight =
-    numLanes > 0 ? TOP_PAD + numLanes * ROW_PITCH - ROW_GAP + BOTTOM_PAD : 0
+    numLanes > 0 ? TOP_PAD + numLanes * BAR_H + CHIP_OFFSET + CHIP_H + BOTTOM_PAD : 0
 
   const innerWidth = Math.max(0, containerWidth - chipInset * 2)
 
@@ -157,7 +156,7 @@ export default function LoopLaneStrip({
         {/* Bars layer */}
         {loops.map((loop) => {
           const lane = lanes[loop.id] ?? 0
-          const top = TOP_PAD + lane * ROW_PITCH
+          const top = TOP_PAD + lane * BAR_H
           const isActive = loop.id === activeLoopId
           return (
             <button
@@ -187,7 +186,7 @@ export default function LoopLaneStrip({
         {/* Chip layer — above all bars, like the margin's chipZ band. */}
         {loops.map((loop) => {
           const lane = lanes[loop.id] ?? 0
-          const top = TOP_PAD + lane * ROW_PITCH + BAR_H + BAR_CHIP_GAP
+          const top = TOP_PAD + lane * BAR_H + BAR_H + CHIP_OFFSET
           const place = chipPlacement.get(loop.id)
           if (!place) return null
           const isActive = loop.id === activeLoopId

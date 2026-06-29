@@ -8,6 +8,7 @@ import {
   type MutableRefObject,
   type PointerEventHandler,
 } from 'react'
+import { createPortal } from 'react-dom'
 import { Plus } from 'lucide-react'
 import WaveSurfer from 'wavesurfer.js'
 import RegionsPlugin from 'wavesurfer.js/dist/plugins/regions.esm.js'
@@ -3521,47 +3522,50 @@ export default function PlayerDock(props: PlayerDockProps) {
         )}
       </div>
 
-      {audioReady && nameModalOpen && (
-        <div className="fixed inset-0 z-[9998] flex items-center justify-center bg-slate-950/40 px-4">
-          <div className="w-full max-w-sm rounded-2xl border border-slate-200 bg-white p-5 shadow-xl">
-            <h3 className="text-lg font-semibold text-slate-900">
-              {renameTargetId ? 'Rename loop' : 'Name this loop'}
-            </h3>
-            <p className="mt-1 text-sm text-slate-500">Give this loop a memorable name.</p>
-            <input
-              autoFocus
-              className="mt-4 w-full rounded-xl border border-slate-200 px-3 py-2 text-slate-900 shadow-sm focus:border-[#4F7F7A] focus:outline-none"
-              value={pendingLoopName}
-              onChange={(event) => setPendingLoopName(event.target.value)}
-              placeholder="Loop name"
-              onKeyDown={(event) => {
-                if (event.key === 'Enter') {
-                  confirmSaveRegion()
-                }
-                if (event.key === 'Escape') {
-                  cancelNameModal()
-                }
-              }}
-            />
-            <div className="mt-4 flex items-center justify-end gap-2">
-              <button
-                className="rounded-full border border-slate-200 px-4 py-2 text-sm text-slate-600 hover:bg-slate-100"
-                type="button"
-                onClick={cancelNameModal}
-              >
-                Cancel
-              </button>
-              <button
-                className="rounded-full bg-[#4F7F7A] px-4 py-2 text-sm text-[#0b1220] shadow-sm"
-                type="button"
-                onClick={confirmSaveRegion}
-              >
-                {renameTargetId ? 'Save' : 'Save loop'}
-              </button>
+      {audioReady &&
+        nameModalOpen &&
+        createPortal(
+          <div className="fixed inset-0 z-[9998] flex items-center justify-center bg-slate-950/40 px-4">
+            <div className="w-full max-w-sm rounded-2xl border border-slate-200 bg-white p-5 shadow-xl">
+              <h3 className="text-lg font-semibold text-slate-900">
+                {renameTargetId ? 'Rename loop' : 'Name this loop'}
+              </h3>
+              <p className="mt-1 text-sm text-slate-500">Give this loop a memorable name.</p>
+              <input
+                autoFocus
+                className="mt-4 w-full rounded-xl border border-slate-200 px-3 py-2 text-slate-900 shadow-sm focus:border-[#4F7F7A] focus:outline-none"
+                value={pendingLoopName}
+                onChange={(event) => setPendingLoopName(event.target.value)}
+                placeholder="Loop name"
+                onKeyDown={(event) => {
+                  if (event.key === 'Enter') {
+                    confirmSaveRegion()
+                  }
+                  if (event.key === 'Escape') {
+                    cancelNameModal()
+                  }
+                }}
+              />
+              <div className="mt-4 flex items-center justify-end gap-2">
+                <button
+                  className="rounded-full border border-slate-200 px-4 py-2 text-sm text-slate-600 hover:bg-slate-100"
+                  type="button"
+                  onClick={cancelNameModal}
+                >
+                  Cancel
+                </button>
+                <button
+                  className="rounded-full bg-[#4F7F7A] px-4 py-2 text-sm text-[#0b1220] shadow-sm"
+                  type="button"
+                  onClick={confirmSaveRegion}
+                >
+                  {renameTargetId ? 'Save' : 'Save loop'}
+                </button>
+              </div>
             </div>
-          </div>
-        </div>
-      )}
+          </div>,
+          document.body,
+        )}
     </div>
   )
 }
